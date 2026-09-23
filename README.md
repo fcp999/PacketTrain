@@ -1,9 +1,17 @@
 # PacketTrain
 
-Browser animation of TCP streams from PCAP and PCAPNG files. Packet launch times,
+Browser animation of TCP streams from PCAP and PCAPNG files. Packet timestamps,
 sizes, flags, duplicate ACKs, SACK blocks, and retransmission indicators come
-from TShark. Motion across the track uses half of a measured RTT as an
-illustrative one-way time when only one capture point is available.
+from TShark. The app compares the two handshake legs to infer whether a capture
+was taken near the client or server. If that is ambiguous, choose the capture
+point manually. RTT uses the long handshake leg when classification is clear,
+or TShark's ACK RTT samples as a fallback. You can override RTT in the UI.
+
+Local-origin packets leave the capture endpoint at their captured timestamp.
+Far-origin packets leave the remote endpoint at timestamp minus estimated
+one-way time, then reach the capture endpoint at the captured timestamp.
+The one-way estimate is RTT/2. It assumes roughly symmetric paths and does not
+claim to measure actual one-way delay.
 
 ## Run with Docker
 
@@ -24,7 +32,9 @@ required.
 
 ## Reading the visualization
 
-- Dot launch times use packet timestamps in the selected capture.
+- Local dot launch times use captured timestamps. Incoming dots arrive at the
+  capture endpoint at their captured timestamps; their remote launch is
+  estimated by subtracting RTT/2.
 - Green is data; purple indicates PSH. Red `R` marks a TShark retransmission
   indicator. Blue `D` is a duplicate ACK; `S` means the ACK contains a SACK
   block. A packet with SACK takes precedence over its duplicate ACK label.
@@ -33,8 +43,9 @@ required.
 - The link rate is a user-supplied model parameter. The app calculates
   serialization time and bandwidth-delay product; it does not infer link speed
   from the PCAP.
-- RTT uses the median TShark ACK RTT sample when available, otherwise the
-  SYN-to-SYN-ACK interval. Neither measures individual one-way delays.
+- RTT uses the long handshake leg when the capture point can be inferred; the
+  median TShark ACK RTT sample is a fallback. Neither measures individual
+  one-way delays. Override the result if you have a better measured RTT.
 - The first 5,000 packet rows are listed while up to 100,000 packets animate.
   The default PCAP size limit is 256 MiB. For large captures, split or filter
   before loading, or raise `MAX_PCAP_BYTES` with enough container memory.
