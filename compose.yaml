@@ -1,0 +1,15 @@
+services:
+  packettrain:
+    build: .
+    container_name: packettrain
+    restart: unless-stopped
+    ports:
+      - "8088:8080"
+    environment:
+      PCAP_DIR: /pcaps
+      MAX_PCAP_BYTES: 268435456
+      MAX_PACKETS: 100000
+    volumes:
+      - ${PCAP_PATH:-./pcaps}:/pcaps:ro
+    security_opt:
+      - no-new-privileges:true
