@@ -41,8 +41,14 @@ required.
 - **X** is shown only for a sequence gap with duplicate ACK or SACK evidence.
   It means an inferred missing range, not a measured physical loss location.
 - The link rate is a user-supplied model parameter. The app calculates
-  serialization time and bandwidth-delay product; it does not infer link speed
-  from the PCAP.
+  serialization time for a typical captured data frame and bandwidth-delay
+  product; it does not infer link speed from the PCAP. If the modeled first
+  flight would take much longer to serialize than the observed frame timestamp
+  span, the interface flags that mismatch. Capture timestamps can precede
+  physical transmission.
+- Negotiated MSS, first data flight, and jumbo segment status come from the
+  selected stream. Large captured frames must not be presented as a collection
+  of 1,500-byte packets; a large negotiated MSS can indicate jumbo frames.
 - RTT uses the long handshake leg when the capture point can be inferred; the
   median TShark ACK RTT sample is a fallback. Neither measures individual
   one-way delays. Override the result if you have a better measured RTT.
