@@ -19,7 +19,7 @@ FIELDS = [
     "tcp.flags.reset", "tcp.flags.push", "tcp.analysis.retransmission",
     "tcp.analysis.fast_retransmission", "tcp.analysis.spurious_retransmission",
     "tcp.analysis.duplicate_ack", "tcp.options.sack_le", "tcp.window_size",
-    "tcp.analysis.ack_rtt",
+    "tcp.analysis.ack_rtt", "tcp.options.mss_val",
 ]
 app = Flask(__name__, static_folder=None)
 
@@ -74,6 +74,7 @@ def parse_rows(lines):
             "sack": bool(p["tcp.options.sack_le"]),
             "window": num(p["tcp.window_size"]),
             "ack_rtt_ms": (decimal(p["tcp.analysis.ack_rtt"]) or 0) * 1000,
+            "mss": num(p["tcp.options.mss_val"]),
         })
     return packets
 
@@ -147,10 +148,34 @@ def stream_detail(packets, stream):
     else:
         rtt = None
         source = "unknown"
+    payload_by_direction = {direction: sum(p["length"] for p in group if p["direction"] == direction)
+                            for direction in ("out", "in")}
+    data_direction = max(payload_by_direction, key=payload_by_direction.get)
+    first_data = next((i for i, p in enumerate(group)
+                       if p["direction"] == data_direction and p["length"] > 0), None)
+    flight = []
+    if first_data is not None:
+        for p in group[first_data:]:
+            if p["direction"] != data_direction and p["ack_flag"]:
+                break
+            if p["direction"] == data_direction and p["length"]:
+                flight.append(p)
+    mss = sorted({p["mss"] for p in group if p["syn"] and p["mss"]})
+    sizes = sorted(p["frame_length"] for p in group if p["length"])
+    facts = {"mss": mss, "max_payload": max((p["length"] for p in group), default=0),
+             "typical_frame_bytes": sizes[len(sizes) // 2] if sizes else None,
+             "jumbo_segments": bool(mss and min(mss) > 1460 and any(p["length"] > 1460 for p in group)),
+             "first_flight_packets": len(flight),
+             "first_flight_bytes": sum(p["length"] for p in flight),
+             "first_flight_span_ms": round(flight[-1]["time_ms"] - flight[0]["time_ms"], 3)
+             if flight else None,
+             "retransmissions": sum(p["retrans"] for p in group),
+             "sack_packets": sum(p["sack"] for p in group),
+             "psh_packets": sum(p["psh"] for p in group)}
     return {"summary": summary, "rtt_ms": round(rtt, 2) if rtt is not None else None,
             "rtt_source": source, "capture_side": side,
             "handshake_legs_ms": [round(leg1, 3), round(leg2, 3)] if leg1 is not None and leg2 is not None else None,
-            "packets": group,
+            "packets": group, "facts": facts,
             "note": "Incoming timestamps are arrival times at the capture point. One-way time is estimated as RTT/2; choose the capture side manually if the handshake is ambiguous."}
 
 
