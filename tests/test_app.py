@@ -78,3 +78,20 @@ def test_handshake_capture_side(synack_time, ack_time, expected_side, expected_r
     assert detail["capture_side"] == expected_side
     if expected_rtt is not None:
         assert detail["rtt_ms"] == pytest.approx(expected_rtt, abs=0.01)
+
+
+def test_jumbo_first_flight_uses_captured_lengths():
+    packets = packettrain.parse_rows([
+        row(1, 0.0, 4, 1, 0, {"tcp.flags.syn": "1", "tcp.options.mss_val": "8960"}),
+        row(2, 0.001, 4, 2, 8948),
+        row(3, 0.002, 4, 8950, 8948),
+        row(4, 0.003, 4, 17898, 8948),
+    ])
+    ack = packets[-1].copy()
+    ack.update({"frame": 5, "ts": 0.220, "src": "198.51.100.2", "sport": 443,
+                "dst": "192.0.2.1", "dport": 50000, "length": 0, "ack_flag": True})
+    detail = packettrain.stream_detail(packets + [ack], 4)
+    assert detail["facts"]["mss"] == [8960]
+    assert detail["facts"]["jumbo_segments"] is True
+    assert detail["facts"]["first_flight_packets"] == 3
+    assert detail["facts"]["first_flight_bytes"] == 26844
