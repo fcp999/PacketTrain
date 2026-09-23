@@ -59,3 +59,22 @@ def test_stream_endpoints_use_tshark_fields(tmp_path, monkeypatch):
     flow = client.get("/api/flow?file=sample.pcap&stream=3").json
     assert flow["packets"][1]["time_ms"] == pytest.approx(200)
     assert flow["packets"][1]["psh"] is True
+
+
+@pytest.mark.parametrize("synack_time,ack_time,expected_side,expected_rtt", [
+    (100.100, 100.101, "client", 100),
+    (100.001, 100.101, "server", 100),
+    (100.050, 100.101, "unknown", None),
+])
+def test_handshake_capture_side(synack_time, ack_time, expected_side, expected_rtt):
+    syn = packettrain.parse_rows([row(1, 100.0, 1, 1, 0, {"tcp.flags.syn": "1"})])[0]
+    synack = syn.copy()
+    synack.update({"frame": 2, "ts": synack_time, "src": "198.51.100.2",
+                   "dst": "192.0.2.1", "sport": 443, "dport": 50000,
+                   "syn": True, "ack_flag": True})
+    third = syn.copy()
+    third.update({"frame": 3, "ts": ack_time, "syn": False, "ack_flag": True})
+    detail = packettrain.stream_detail([syn, synack, third], 1)
+    assert detail["capture_side"] == expected_side
+    if expected_rtt is not None:
+        assert detail["rtt_ms"] == pytest.approx(expected_rtt, abs=0.01)
