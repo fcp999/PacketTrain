@@ -35,7 +35,13 @@ required.
 - Local dot launch times use captured timestamps. Incoming dots arrive at the
   capture endpoint at their captured timestamps; their remote launch is
   estimated by subtracting RTT/2.
-- Green is data; purple indicates PSH. Red `R` marks a TShark retransmission
+- Data records are length-scaled rectangles. Their width represents modeled
+  serialization time relative to estimated one-way transit, with limits to
+  keep the view readable. `G` marks a captured payload over 1460 bytes that
+  may represent GRO/LRO aggregation or jumbo traffic. It is one capture
+  record, not a proven count of wire packets.
+- Green is data; purple indicates PSH. SYN, SYN+ACK, FIN, and RST are labeled
+  on their moving control dots. Red `R` marks a TShark retransmission
   indicator. Blue `D` is a duplicate ACK; `S` means the ACK contains a SACK
   block. A packet with SACK takes precedence over its duplicate ACK label.
 - **X** is shown only for a sequence gap with duplicate ACK or SACK evidence.
@@ -46,9 +52,9 @@ required.
   flight would take much longer to serialize than the observed frame timestamp
   span, the interface flags that mismatch. Capture timestamps can precede
   physical transmission.
-- Negotiated MSS, first data flight, and jumbo segment status come from the
-  selected stream. Large captured frames must not be presented as a collection
-  of 1,500-byte packets; a large negotiated MSS can indicate jumbo frames.
+- Advertised MSS, first data flight, and large capture-record counts come from
+  the selected stream. Large records can be caused by jumbo MTU, GRO/LRO, or
+  capture before segmentation. The app does not assert their on-wire count.
 - RTT uses the long handshake leg when the capture point can be inferred; the
   median TShark ACK RTT sample is a fallback. Neither measures individual
   one-way delays. Override the result if you have a better measured RTT.
