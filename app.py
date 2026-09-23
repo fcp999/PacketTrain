@@ -124,18 +124,34 @@ def stream_detail(packets, stream):
         p["time_ms"] = round((p.pop("ts") - first_ts) * 1000, 3)
         p["direction"] = "out" if (p["src"], p["sport"]) == (
             summary["client"], summary["client_port"]) else "in"
+    syn = next((p for p in group if p["syn"] and not p["ack_flag"] and p["direction"] == "out"), None)
+    synack = next((p for p in group if p["syn"] and p["ack_flag"] and p["direction"] == "in"
+                   and (syn is None or p["time_ms"] > syn["time_ms"])), None)
+    third = next((p for p in group if p["ack_flag"] and not p["syn"] and p["direction"] == "out"
+                  and synack and p["time_ms"] > synack["time_ms"]), None)
+    leg1 = synack["time_ms"] - syn["time_ms"] if syn and synack else None
+    leg2 = third["time_ms"] - synack["time_ms"] if third and synack else None
+    side = "unknown"
+    if leg1 is not None and leg2 is not None and min(leg1, leg2) >= 0:
+        if leg1 >= 3 * max(leg2, 0.001):
+            side = "client"  # SYN travels and SYN-ACK returns; final ACK is nearby.
+        elif leg2 >= 3 * max(leg1, 0.001):
+            side = "server"  # SYN-ACK is nearby; final ACK makes the round trip.
     rtts = sorted(p["ack_rtt_ms"] for p in group if 0 < p["ack_rtt_ms"] < 60_000)
-    if rtts:
+    if side != "unknown":
+        rtt = leg1 if side == "client" else leg2
+        source = "three-way handshake estimate"
+    elif rtts:
         rtt = rtts[len(rtts) // 2]
         source = "TShark ACK RTT median"
     else:
-        syn = next((p for p in group if p["syn"] and not p["ack_flag"]), None)
-        synack = next((p for p in group if p["syn"] and p["ack_flag"]), None)
-        rtt = synack["time_ms"] - syn["time_ms"] if syn and synack else None
-        source = "SYN to SYN-ACK estimate" if rtt is not None else "unknown"
+        rtt = None
+        source = "unknown"
     return {"summary": summary, "rtt_ms": round(rtt, 2) if rtt is not None else None,
-            "rtt_source": source, "packets": group,
-            "note": "Travel between endpoints is illustrative for a single capture. Packet times and flags come from the PCAP."}
+            "rtt_source": source, "capture_side": side,
+            "handshake_legs_ms": [round(leg1, 3), round(leg2, 3)] if leg1 is not None and leg2 is not None else None,
+            "packets": group,
+            "note": "Incoming timestamps are arrival times at the capture point. One-way time is estimated as RTT/2; choose the capture side manually if the handshake is ambiguous."}
 
 
 @app.get("/")
