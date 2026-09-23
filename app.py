@@ -15,7 +15,7 @@ EXTENSIONS = {".pcap", ".pcapng", ".cap"}
 FIELDS = [
     "frame.number", "frame.time_epoch", "ip.src", "ipv6.src", "ip.dst", "ipv6.dst",
     "tcp.srcport", "tcp.dstport", "tcp.stream", "tcp.seq_raw", "tcp.ack_raw",
-    "tcp.len", "frame.len", "tcp.flags.syn", "tcp.flags.ack", "tcp.flags.fin",
+    "tcp.len", "frame.len", "tcp.flags", "tcp.flags.syn", "tcp.flags.ack", "tcp.flags.fin",
     "tcp.flags.reset", "tcp.flags.push", "tcp.analysis.retransmission",
     "tcp.analysis.fast_retransmission", "tcp.analysis.spurious_retransmission",
     "tcp.analysis.duplicate_ack", "tcp.options.sack_le", "tcp.window_size",
@@ -42,6 +42,19 @@ def num(value, default=0):
         return default
 
 
+def flag_bits(value):
+    try:
+        return int(value, 0) if value else None
+    except ValueError:
+        return None
+
+
+def flag_set(fields, bitmask, field, bit):
+    if bitmask is not None:
+        return bool(bitmask & bit)
+    return fields[field].strip().lower() in {"1", "true", "yes", "set"}
+
+
 def decimal(value):
     try:
         return float(value)
@@ -58,15 +71,19 @@ def parse_rows(lines):
         ts = decimal(p["frame.time_epoch"])
         if ts is None or not p["tcp.stream"]:
             continue
+        bits = flag_bits(p["tcp.flags"])
         packets.append({
             "frame": num(p["frame.number"]), "ts": ts, "stream": num(p["tcp.stream"]),
             "src": p["ip.src"] or p["ipv6.src"], "dst": p["ip.dst"] or p["ipv6.dst"],
             "sport": num(p["tcp.srcport"]), "dport": num(p["tcp.dstport"]),
             "seq": num(p["tcp.seq_raw"]), "ack": num(p["tcp.ack_raw"]),
             "length": num(p["tcp.len"]), "frame_length": num(p["frame.len"]),
-            "syn": p["tcp.flags.syn"] == "1", "ack_flag": p["tcp.flags.ack"] == "1",
-            "fin": p["tcp.flags.fin"] == "1", "rst": p["tcp.flags.reset"] == "1",
-            "psh": p["tcp.flags.push"] == "1",
+            "flags_raw": bits,
+            "syn": flag_set(p, bits, "tcp.flags.syn", 0x02),
+            "ack_flag": flag_set(p, bits, "tcp.flags.ack", 0x10),
+            "fin": flag_set(p, bits, "tcp.flags.fin", 0x01),
+            "rst": flag_set(p, bits, "tcp.flags.reset", 0x04),
+            "psh": flag_set(p, bits, "tcp.flags.push", 0x08),
             "retrans": any(p[field] for field in (
                 "tcp.analysis.retransmission", "tcp.analysis.fast_retransmission",
                 "tcp.analysis.spurious_retransmission")),
@@ -164,7 +181,7 @@ def stream_detail(packets, stream):
     sizes = sorted(p["frame_length"] for p in group if p["length"])
     facts = {"mss": mss, "max_payload": max((p["length"] for p in group), default=0),
              "typical_frame_bytes": sizes[len(sizes) // 2] if sizes else None,
-             "jumbo_segments": bool(mss and min(mss) > 1460 and any(p["length"] > 1460 for p in group)),
+             "large_capture_records": sum(p["length"] > 1460 for p in group),
              "first_flight_packets": len(flight),
              "first_flight_bytes": sum(p["length"] for p in flight),
              "first_flight_span_ms": round(flight[-1]["time_ms"] - flight[0]["time_ms"], 3)
