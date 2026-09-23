@@ -92,6 +92,25 @@ def test_jumbo_first_flight_uses_captured_lengths():
                 "dst": "192.0.2.1", "dport": 50000, "length": 0, "ack_flag": True})
     detail = packettrain.stream_detail(packets + [ack], 4)
     assert detail["facts"]["mss"] == [8960]
-    assert detail["facts"]["jumbo_segments"] is True
+    assert detail["facts"]["large_capture_records"] == 3
     assert detail["facts"]["first_flight_packets"] == 3
     assert detail["facts"]["first_flight_bytes"] == 26844
+
+
+def test_raw_tcp_flag_mask_covers_handshake_and_teardown():
+    packets = packettrain.parse_rows([
+        row(1, 0.0, 1, 1, 0, {"tcp.flags": "0x0002"}),
+        row(2, 0.1, 1, 2, 0, {"tcp.flags": "0x0012"}),
+        row(3, 0.2, 1, 3, 0, {"tcp.flags": "0x0011"}),
+        row(4, 0.3, 1, 4, 0, {"tcp.flags": "0x0014"}),
+    ])
+    assert [(p["syn"], p["ack_flag"], p["fin"], p["rst"]) for p in packets] == [
+        (True, False, False, False), (True, True, False, False),
+        (False, True, True, False), (False, True, False, True),
+    ]
+
+
+def test_boolean_text_fallback():
+    p = packettrain.parse_rows([row(1, 0.0, 1, 1, 0,
+        {"tcp.flags.syn": "True", "tcp.flags.ack": "False"})])[0]
+    assert p["syn"] and not p["ack_flag"]
