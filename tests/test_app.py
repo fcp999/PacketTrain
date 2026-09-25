@@ -114,3 +114,39 @@ def test_boolean_text_fallback():
     p = packettrain.parse_rows([row(1, 0.0, 1, 1, 0,
         {"tcp.flags.syn": "True", "tcp.flags.ack": "False"})])[0]
     assert p["syn"] and not p["ack_flag"]
+
+
+def traffic(ts, side, size, syn=False, ack=False):
+    return {"ts": ts, "src": "192.0.2.1" if side == "client" else "198.51.100.2",
+            "sport": 50000 if side == "client" else 443, "length": size,
+            "syn": syn, "ack_flag": ack}
+
+
+def classify(packets):
+    return packettrain.classify_stream(packets, ("192.0.2.1", 50000))
+
+
+def test_bulk_patterns_are_directional_and_explain_themselves():
+    download = [traffic(0, "client", 96)] + [traffic(0.3 + i * .01, "server", 9000)
+                                             for i in range(50)]
+    result = classify(download)
+    assert result["label"] == "Bulk download pattern"
+    assert result["confidence"] == "high"
+    assert result["metrics"]["server_bytes"] == 450000
+    upload = [traffic(0, "server", 96)] + [traffic(0.3 + i * .01, "client", 9000)
+                                            for i in range(50)]
+    assert classify(upload)["label"] == "Bulk upload pattern"
+
+
+def test_periodic_polling_and_interactive_exchange():
+    polling = [p for i in range(5) for p in
+               (traffic(i * 2.0, "client", 80), traffic(i * 2.0 + .1, "server", 100))]
+    assert classify(polling)["label"] == "Periodic polling pattern"
+    chat = [p for i in range(4) for p in
+            (traffic(i * 3.0, "client", 60), traffic(i * 3.0 + 1.2, "server", 110))]
+    assert classify(chat)["label"] == "Interactive exchange pattern"
+
+
+def test_short_exchange_and_control_only():
+    assert classify([traffic(0, "client", 75), traffic(.2, "server", 800)])["label"] == "Request/response pattern"
+    assert classify([traffic(0, "client", 0, syn=True)])["label"] == "Connection attempt"
