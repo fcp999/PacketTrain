@@ -21,6 +21,8 @@ FIELDS = [
     "tcp.analysis.fast_retransmission", "tcp.analysis.spurious_retransmission",
     "tcp.analysis.duplicate_ack", "tcp.options.sack_le", "tcp.window_size",
     "tcp.analysis.ack_rtt", "tcp.options.mss_val",
+    "tls.handshake.type", "tls.record.content_type", "tls.handshake.extensions_server_name",
+    "tls.handshake.extensions_alpn_str", "tls.handshake.version",
 ]
 app = Flask(__name__, static_folder=None)
 
@@ -93,6 +95,11 @@ def parse_rows(lines):
             "window": num(p["tcp.window_size"]),
             "ack_rtt_ms": (decimal(p["tcp.analysis.ack_rtt"]) or 0) * 1000,
             "mss": num(p["tcp.options.mss_val"]),
+            "tls_handshake": p["tls.handshake.type"],
+            "tls_record": p["tls.record.content_type"],
+            "tls_sni": p["tls.handshake.extensions_server_name"],
+            "tls_alpn": p["tls.handshake.extensions_alpn_str"],
+            "tls_version": p["tls.handshake.version"],
         })
     return packets
 
@@ -204,6 +211,53 @@ def classify_stream(packets, client):
             "metrics": metrics, "scope": "Traffic behavior only; encrypted payloads and partial captures limit application identification."}
 
 
+def analyze_https(packets, client):
+    """Describe visible TLS phases and classify encrypted traffic behavior.
+
+    TLS 1.3 encrypted handshake records look like application data on the wire.
+    We therefore never call a ciphertext record an HTTP request or response.
+    """
+    ordered = sorted(packets, key=lambda p: p["ts"])
+    client_packets = [p for p in ordered if (p["src"], p["sport"]) == client]
+    server_packets = [p for p in ordered if (p["src"], p["sport"]) != client]
+    handshake_types = lambda p: set(re.split(r"[,;]", p.get("tls_handshake", "")))
+    hello = next((p for p in client_packets if "1" in handshake_types(p)), None)
+    server_hello = next((p for p in server_packets if "2" in handshake_types(p)
+                         and (hello is None or p["ts"] >= hello["ts"])), None)
+    if not hello and not server_hello:
+        return None
+
+    def elapsed(later, earlier):
+        return round((later["ts"] - earlier["ts"]) * 1000, 3) if later and earlier else None
+
+    # Explicit 23 is the TLS outer application_data record. For TLS 1.3 it
+    # also carries encrypted handshake messages; this is a phase boundary only.
+    encrypted = [p for p in ordered if "23" in re.split(r"[,;]", p.get("tls_record", ""))]
+    first_server_cipher = next((p for p in encrypted if p in server_packets and
+                                (server_hello is None or p["ts"] >= server_hello["ts"])), None)
+    first_client_cipher = next((p for p in encrypted if p in client_packets and
+                                (server_hello is None or p["ts"] >= server_hello["ts"])), None)
+    sni = next((p["tls_sni"] for p in client_packets if p.get("tls_sni")), None)
+    alpn = next((p["tls_alpn"] for p in client_packets if p.get("tls_alpn")), None)
+    # Drop visible handshake packets and the first encrypted flights on both
+    # sides. This is deliberately approximate; coalesced records remain opaque.
+    excluded = {p["frame"] for p in ordered if p.get("tls_handshake")}
+    excluded.update(p["frame"] for p in (first_client_cipher, first_server_cipher) if p)
+    traffic = [p for p in ordered if p["frame"] not in excluded]
+    behavior = classify_stream(traffic, client)
+    return {
+        "detected": True, "sni": sni, "alpn_offered": alpn,
+        "client_hello_frame": hello["frame"] if hello else None,
+        "server_hello_frame": server_hello["frame"] if server_hello else None,
+        "client_hello_to_server_hello_ms": elapsed(server_hello, hello),
+        "server_hello_to_first_server_cipher_ms": elapsed(first_server_cipher, server_hello),
+        "first_client_cipher_frame": first_client_cipher["frame"] if first_client_cipher else None,
+        "first_server_cipher_frame": first_server_cipher["frame"] if first_server_cipher else None,
+        "behavior": behavior,
+        "limitation": "Ciphertext cannot identify an HTTP method, status, URL, file, or exact request boundary. TLS 1.3 encrypts most handshake messages; outer type 23 can still be handshake data. Timings at one capture point include path delay.",
+    }
+
+
 def summarize(packets):
     groups = defaultdict(list)
     for packet in packets:
@@ -228,6 +282,7 @@ def stream_detail(packets, stream):
     summary = next(s for s in summarize(group) if s["id"] == stream)
     first_ts = group[0]["ts"]
     pattern = classify_stream(group, (summary["client"], summary["client_port"]))
+    https = analyze_https(group, (summary["client"], summary["client_port"]))
     for p in group:
         p["time_ms"] = round((p.pop("ts") - first_ts) * 1000, 3)
         p["direction"] = "out" if (p["src"], p["sport"]) == (
@@ -283,6 +338,7 @@ def stream_detail(packets, stream):
             "rtt_source": source, "capture_side": side,
             "handshake_legs_ms": [round(leg1, 3), round(leg2, 3)] if leg1 is not None and leg2 is not None else None,
             "packets": group, "facts": facts, "pattern": pattern,
+            "https": https,
             "note": "Incoming timestamps are arrival times at the capture point. One-way time is estimated as RTT/2; choose the capture side manually if the handshake is ambiguous."}
 
 
