@@ -20,6 +20,24 @@ one-way time, then reach the capture endpoint at the captured timestamp.
 The one-way estimate is RTT/2. It assumes roughly symmetric paths and does not
 claim to measure actual one-way delay.
 
+## HTTPS / TLS view
+
+When TShark sees a TLS ClientHello or ServerHello in a TCP stream, the flow
+page shows visible handshake milestones, offered SNI and ALPN, and the traffic
+pattern of later ciphertext. ClientHello to ServerHello is an observed
+interval: at a client-side capture it includes the network round trip and
+server handling; near the server it mostly reflects server handling. The
+ServerHello to first server ciphertext interval is an encrypted-handshake
+phase estimate, not a pure key-exchange timer.
+
+The encrypted behavior label describes traffic shape, such as bulk download,
+upload, periodic polling, or interactive exchange. It cannot reveal the HTTP
+method, URL, status, file type, or an exact request boundary. TLS 1.3 encrypts
+most handshake messages; its first ciphertext records can contain handshake
+traffic. SNI can be absent or protected by ECH, and the ClientHello ALPN list
+is an offer, not proof of the protocol selected. Captures that begin after the
+hello show no TLS card.
+
 ## Run with Docker
 
 ```bash
