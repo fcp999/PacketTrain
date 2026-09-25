@@ -7,6 +7,13 @@ was taken near the client or server. If that is ambiguous, choose the capture
 point manually. RTT uses the long handshake leg when classification is clear,
 or TShark's ACK RTT samples as a fallback. You can override RTT in the UI.
 
+The stream menu also classifies **traffic patterns** from payload direction,
+volume, timing, and turn-taking: bulk download/upload, periodic polling,
+interactive exchange, sparse notifications, request/response, and control-only
+connections. Each label includes its evidence and confidence. A bulk download
+pattern does not prove a file transfer; encrypted video or another large
+response can look similar. The classifier does not inspect payload contents.
+
 Local-origin packets leave the capture endpoint at their captured timestamp.
 Far-origin packets leave the remote endpoint at timestamp minus estimated
 one-way time, then reach the capture endpoint at the captured timestamp.
