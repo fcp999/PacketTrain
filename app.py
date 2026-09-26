@@ -37,6 +37,12 @@ def index():
     return send_from_directory(ROOT, "index.html")
 
 
+@app.get("/static/<path:name>")
+def static_assets(name):
+    """Serve vendored front-end assets. Only static/ is reachable."""
+    return send_from_directory(ROOT / "packettrain" / "static", name)
+
+
 @app.get("/api/files")
 def files():
     directory = capture_dir()
