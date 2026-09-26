@@ -241,3 +241,76 @@ def test_tls_with_application_data_still_classifies_normally():
     assert tls["behavior"]["label"] == "Bulk download pattern"
     assert tls["behavior"]["confidence"] == "high"
     assert tls["undecoded_records"] is False
+
+
+def test_slicing_report_detects_truncated_capture():
+    """A frame stored shorter than claimed is slicing (snaplen truncation).
+
+    Mirrors the live ollama.com_001.pcap case, where frame 5 claimed tcp.len 120
+    and stored only the 66-byte header, so the ClientHello's extensions (and its
+    SNI) were never captured.
+    """
+    lines = [
+        row(1, 0.0, 1, 1, 0, {}),
+        row(2, 0.1, 1, 2, 1400, {}),
+    ]
+    packets = packettrain.parse_rows(lines)
+    # Simulate slicing: claimed 186 on the wire, only 66 stored.
+    packets[1]["frame_length"] = 186
+    packets[1]["cap_length"] = 66
+    packets[1]["sliced"] = True
+    report = packettrain.slicing_report(packets)
+    assert report["sliced"] is True
+    assert report["sliced_frames"] == 1
+    assert report["lost_bytes"] == 120
+    assert report["total"] == 2
+    assert "-s 0" in report["advice"]
+
+
+def test_slicing_report_clean_capture_has_no_advice():
+    packets = packettrain.parse_rows([row(1, 0.0, 1, 1, 100, {}), row(2, 0.1, 1, 2, 200, {})])
+    for p in packets:
+        p["cap_length"] = p["frame_length"]
+        p["sliced"] = False
+    report = packettrain.slicing_report(packets)
+    assert report["sliced"] is False
+    assert report["sliced_frames"] == 0
+    assert report["lost_bytes"] == 0
+    assert report["advice"] is None
+
+
+def test_slicing_report_heavy_loss_flags_heavy_wording():
+    packets = []
+    for i in range(10):
+        p = packettrain.parse_rows([row(i + 1, i * 0.1, 1, i + 1, 1400, {})])[0]
+        p["frame_length"] = 186
+        p["cap_length"] = 66
+        p["sliced"] = True
+        packets.append(p)
+    report = packettrain.slicing_report(packets)
+    assert report["sliced_fraction"] == 1.0
+    assert "heavily sliced" in report["advice"]
+
+
+def test_slicing_report_empty_is_safe():
+    report = packettrain.slicing_report([])
+    assert report["sliced"] is False
+    assert report["total"] == 0
+    assert report["advice"] is None
+
+
+def test_flow_reports_slicing_for_stream():
+    """A sliced stream must say so, instead of only hiding derived fields."""
+    lines = [
+        row(1, 0.0, 1, 1, 0, {"tcp.flags.syn": "1"}),
+        row(2, 0.02, 1, 2, 0, {"tcp.flags.syn": "1", "tcp.flags.ack": "1"}),
+        row(3, 0.03, 1, 3, 0, {"tcp.flags.ack": "1"}),
+        row(4, 0.04, 1, 4, 1400, {}),
+    ]
+    packets = packettrain.parse_rows(lines)
+    packets[3]["frame_length"] = 1466
+    packets[3]["cap_length"] = 66
+    packets[3]["sliced"] = True
+    detail = packettrain.stream_detail(packets, 1)
+    assert detail["slicing"]["sliced"] is True
+    assert detail["slicing"]["lost_bytes"] == 1400

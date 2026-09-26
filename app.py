@@ -16,7 +16,7 @@ EXTENSIONS = {".pcap", ".pcapng", ".cap"}
 FIELDS = [
     "frame.number", "frame.time_epoch", "ip.src", "ipv6.src", "ip.dst", "ipv6.dst",
     "tcp.srcport", "tcp.dstport", "tcp.stream", "tcp.seq_raw", "tcp.ack_raw",
-    "tcp.len", "frame.len", "tcp.flags", "tcp.flags.syn", "tcp.flags.ack", "tcp.flags.fin",
+    "tcp.len", "frame.len", "frame.cap_len", "tcp.flags", "tcp.flags.syn", "tcp.flags.ack", "tcp.flags.fin",
     "tcp.flags.reset", "tcp.flags.push", "tcp.analysis.retransmission",
     "tcp.analysis.fast_retransmission", "tcp.analysis.spurious_retransmission",
     "tcp.analysis.duplicate_ack", "tcp.options.sack_le", "tcp.window_size",
@@ -81,6 +81,9 @@ def parse_rows(lines):
             "sport": num(p["tcp.srcport"]), "dport": num(p["tcp.dstport"]),
             "seq": num(p["tcp.seq_raw"]), "ack": num(p["tcp.ack_raw"]),
             "length": num(p["tcp.len"]), "frame_length": num(p["frame.len"]),
+            "cap_length": num(p["frame.cap_len"]),
+            "sliced": (num(p["frame.cap_len"]) > 0
+                       and num(p["frame.cap_len"]) < num(p["frame.len"])),
             "flags_raw": bits,
             "syn": flag_set(p, bits, "tcp.flags.syn", 0x02),
             "ack_flag": flag_set(p, bits, "tcp.flags.ack", 0x10),
@@ -102,6 +105,36 @@ def parse_rows(lines):
             "tls_version": p["tls.handshake.version"],
         })
     return packets
+
+
+def slicing_report(packets):
+    """Describe packet slicing (snaplen truncation) for a capture.
+
+    A sliced capture stores fewer bytes than the frame claimed on the wire.
+    When the cut lands inside a record, the decoder sees a valid header with an
+    incomplete body and correctly declines to dissect it, so fields such as SNI
+    or ALPN come back empty even though the traffic is real. Reporting the loss
+    distinguishes "nothing there" from "not captured".
+    """
+    total = len(packets)
+    if not total:
+        return {"sliced": False, "total": 0, "sliced_frames": 0, "lost_bytes": 0,
+                "sliced_fraction": 0.0, "advice": None}
+    sliced = [p for p in packets if p["sliced"]]
+    lost = sum(p["frame_length"] - p["cap_length"] for p in sliced)
+    fraction = len(sliced) / total
+    if not sliced:
+        advice = None
+    elif fraction >= 0.5:
+        advice = ("This capture is heavily sliced: most frames are stored shorter than "
+                  "they were on the wire, so payload records and TLS fields may be "
+                  "unreadable. Recapture with a full snaplen (-s 0).")
+    else:
+        advice = ("Some frames are stored shorter than they were on the wire. Any field "
+                  "missing from a sliced frame was never captured; recapture with "
+                  "-s 0 to recover it.")
+    return {"sliced": bool(sliced), "total": total, "sliced_frames": len(sliced),
+            "lost_bytes": lost, "sliced_fraction": round(fraction, 4), "advice": advice}
 
 
 def read_capture(path):
@@ -368,7 +401,7 @@ def stream_detail(packets, stream):
             "rtt_source": source, "capture_side": side,
             "handshake_legs_ms": [round(leg1, 3), round(leg2, 3)] if leg1 is not None and leg2 is not None else None,
             "packets": group, "facts": facts, "pattern": pattern,
-            "https": https,
+            "https": https, "slicing": slicing_report(group),
             "note": "Incoming timestamps are arrival times at the capture point. One-way time is estimated as RTT/2; choose the capture side manually if the handshake is ambiguous."}
 
 
@@ -401,6 +434,46 @@ def flow():
         abort(400, "Invalid stream")
     packets = read_capture(capture_path(request.args.get("file", "")))
     return jsonify(stream_detail(packets, int(raw)))
+
+
+@app.get("/api/slicing")
+def slicing():
+    """Report packet slicing for one capture without reading full packet detail."""
+    path = capture_path(request.args.get("file", ""))
+    command = ["tshark", "-n", "-r", str(path), "-Y", "tcp", "-T", "fields",
+               "-e", "frame.len", "-e", "frame.cap_len"]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=180,
+                                check=False, errors="replace")
+    except subprocess.TimeoutExpired:
+        abort(504, "TShark timed out")
+    if result.returncode:
+        abort(422, "TShark could not read this capture: " + result.stderr[-500:])
+    total = sliced = lost = 0
+    for line in result.stdout.splitlines():
+        columns = line.rstrip("\r\n").split("\t")
+        if len(columns) < 2:
+            continue
+        total += 1
+        claimed = num(columns[0])
+        stored = num(columns[1])
+        if 0 < stored < claimed:
+            sliced += 1
+            lost += claimed - stored
+    fraction = (sliced / total) if total else 0.0
+    if sliced and fraction >= 0.5:
+        advice = ("This capture is heavily sliced: most frames are stored shorter than "
+                  "they were on the wire, so payload records and TLS fields may be "
+                  "unreadable. Recapture with a full snaplen (-s 0).")
+    elif sliced:
+        advice = ("Some frames are stored shorter than they were on the wire. Any field "
+                  "missing from a sliced frame was never captured; recapture with "
+                  "-s 0 to recover it.")
+    else:
+        advice = None
+    return jsonify({"file": path.name, "total": total, "sliced_frames": sliced,
+                    "lost_bytes": lost, "sliced_fraction": round(fraction, 4),
+                    "sliced": bool(sliced), "advice": advice})
 
 
 @app.errorhandler(400)
