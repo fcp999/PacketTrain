@@ -431,3 +431,195 @@ def test_flow_carries_position_object():
     assert detail["capture_side"] == "client"
     assert detail["position"]["side"] == "client"
     assert isinstance(detail["position"]["evidence"], list)
+
+
+def _stream(packets, ts=0.0):
+    """Give packets a time_ms and direction, as stream_detail does.
+
+    Call again after overriding a packet's src to refresh its direction.
+    """
+    for p in packets:
+        p["time_ms"] = round((p["ts"] - packets[0]["ts"]) * 1000, 3)
+        p["direction"] = "out" if p["src"] == "192.0.2.1" else "in"
+    return packets
+
+
+def test_unique_payload_dedupes_overlap():
+    """Partial retransmission overlap must be counted once, not summed."""
+    acc = packettrain.accounting_tcp
+    # Two ranges overlapping by 100 bytes; naive sum would be 800.
+    assert acc.unique_payload([(0, 500), (400, 700)]) == 700
+    # Fully disjoint.
+    assert acc.unique_payload([(0, 100), (200, 300)]) == 200
+    # Exact duplicate.
+    assert acc.unique_payload([(0, 100), (0, 100)]) == 100
+    assert acc.unique_payload([]) == 0
+
+
+def test_unique_payload_handles_wraparound():
+    """A range crossing 2^32 is split, not treated as backwards."""
+    acc = packettrain.accounting_tcp
+    top = acc.SEQ_SPACE
+    # 100 bytes at the very top plus 100 bytes at the bottom.
+    assert acc.unique_payload([(top - 100, top), (0, 100)]) == 200
+
+
+def test_window_scale_is_none_when_not_advertised():
+    """Unknown scale must be None, never an assumed 0."""
+    acc = packettrain.accounting_tcp
+    lines = [
+        row(1, 0.000, 1, 100, 0, {"tcp.flags.syn": "1"}),
+        row(2, 0.100, 1, 200, 1400, {"tcp.flags.ack": "1"}),
+    ]
+    packets = _stream(packettrain.parse_rows(lines))
+    packets[1].update(src="198.51.100.2", dst="192.0.2.1", sport=443, dport=50000)
+    result = acc.scaled_window(packets)
+    assert result["client_scale_shift"] is None
+    assert result["server_scale_shift"] is None
+    # Reported unscaled, and labelled as such rather than multiplied by 1.
+    assert all(pt["scaled"] is None for pt in result["history"])
+    assert all("unscaled" in pt["counting_basis"] for pt in result["history"])
+
+
+def test_window_scale_is_per_direction_and_skips_syn():
+    """Each direction scales by its own advertised shift; a SYN window is unscaled.
+
+    Window scale is negotiated independently per direction, so one side
+    advertising shift 7 says nothing about the other side's windows.
+    """
+    acc = packettrain.accounting_tcp
+    lines = [
+        row(1, 0.000, 1, 100, 0, {"tcp.flags.syn": "1", "tcp.options.wscale.shift": "7"}),
+        row(2, 0.010, 1, 200, 0, {"tcp.flags.syn": "1", "tcp.flags.ack": "1",
+                                   "tcp.options.wscale.shift": "8"}),
+        row(3, 0.100, 1, 101, 1400, {"tcp.flags.ack": "1"}),
+        row(4, 0.110, 1, 201, 1400, {"tcp.flags.ack": "1"}),
+    ]
+    packets = _stream(packettrain.parse_rows(lines))
+    # Frames 2 and 4 travel server -> client.
+    for idx in (1, 3):
+        packets[idx].update(src="198.51.100.2", dst="192.0.2.1", sport=443, dport=50000)
+    _stream(packets)
+    packets[0]["window"] = 64240   # client SYN
+    packets[1]["window"] = 64240   # server SYN-ACK
+    packets[2]["window"] = 502     # client data
+    packets[3]["window"] = 256     # server data
+
+    result = acc.scaled_window(packets)
+    assert result["client_scale_shift"] == 7
+    assert result["server_scale_shift"] == 8
+
+    by_dir = {}
+    for pt in result["history"]:
+        by_dir.setdefault(pt["direction"], []).append(pt)
+
+    # Both SYN windows stay unscaled even though they carry the option.
+    assert by_dir["out"][0]["scaled"] is None
+    assert by_dir["in"][0]["scaled"] is None
+    # Data windows scale by their own direction's shift.
+    assert by_dir["out"][1]["scaled"] == 502 << 7    # 64256, matches TShark
+    assert by_dir["in"][1]["scaled"] == 256 << 8     # 65536
+
+
+def test_outstanding_bytes_starts_full_and_drains_on_ack():
+    acc = packettrain.accounting_tcp
+    lines = [
+        row(1, 0.000, 1, 1000, 0, {"tcp.flags.syn": "1"}),
+        row(2, 0.010, 1, 1001, 500, {"tcp.flags.ack": "1"}),
+        row(3, 0.020, 1, 1501, 500, {"tcp.flags.ack": "1"}),
+        row(4, 0.030, 1, 2001, 0, {"tcp.flags.ack": "1"}),
+    ]
+    packets = _stream(packettrain.parse_rows(lines))
+    packets[3].update(src="198.51.100.2", dst="192.0.2.1", sport=443, dport=50000)
+    _stream(packets)
+    # The server acks to 1001, so both sent segments (1001-2001) stay outstanding.
+    packets[3]["ack"] = 1001
+    result = acc.outstanding_bytes(packets)
+    points = [p for p in result["series"] if p["direction"] == "out"]
+    assert points, "expected an outstanding series for the client direction"
+    assert points[-1]["outstanding"] == 1000
+    # Ack everything and confirm the outstanding figure drains to zero.
+    packets[3]["ack"] = 2001
+    drained = acc.outstanding_bytes(packets)
+    assert all(p["outstanding"] == 0 for p in drained["series"]
+               if p["direction"] == "out")
+
+
+def test_largest_burst_reports_threshold_and_sensitivity():
+    acc = packettrain.accounting_tcp
+    lines = []
+    for i in range(6):
+        lines.append(row(i + 1, i * 0.01, 1, 1000 + i * 500, 500, {"tcp.flags.ack": "1"}))
+    packets = _stream(packettrain.parse_rows(lines))
+    result = acc.largest_burst(packets)
+    assert result["largest"]["bytes"] == 3000
+    assert result["largest"]["records"] == 6
+    assert result["threshold_s"] == acc.BURST_GAP_S
+    assert len(result["sensitivity"]) == 4
+
+
+def test_accounting_reports_limitations():
+    """Each result names its basis, so callers cannot read it as cwnd."""
+    acc = packettrain.accounting_tcp
+    lines = [
+        row(1, 0.0, 1, 1, 0, {"tcp.flags.syn": "1"}),
+        row(2, 0.01, 1, 2, 1400, {"tcp.flags.ack": "1"}),
+    ]
+    packets = _stream(packettrain.parse_rows(lines))
+    result = acc.tcp_accounting(packets)
+    assert "not cwnd" in result["outstanding"]["limitation"]
+    assert "not a congestion-window measurement" in result["bursts"]["limitation"]
+    assert result["unique_payload_bytes"]["client"] == 1400
+
+
+def test_flow_carries_accounting_with_limitations():
+    """The flow payload exposes accounting, each part naming its basis."""
+    lines = [
+        row(1, 0.000, 1, 1000, 0, {"tcp.flags.syn": "1", "tcp.options.wscale.shift": "7"}),
+        row(2, 0.010, 1, 2000, 0, {"tcp.flags.syn": "1", "tcp.flags.ack": "1",
+                                   "tcp.options.wscale.shift": "7"}),
+        row(3, 0.100, 1, 1001, 1400, {"tcp.flags.ack": "1"}),
+        row(4, 0.110, 1, 2001, 0, {"tcp.flags.ack": "1"}),
+    ]
+    packets = packettrain.parse_rows(lines)
+    for idx in (1, 3):
+        packets[idx].update(src="198.51.100.2", dst="192.0.2.1", sport=443, dport=50000)
+    detail = packettrain.stream_detail(packets, 1)
+    acc = detail["accounting"]
+    assert acc["unique_payload_bytes"]["client"] == 1400
+    assert acc["window"]["client_scale_shift"] == 7
+    assert acc["window"]["server_scale_shift"] == 7
+    assert "not cwnd" in acc["outstanding"]["limitation"]
+    assert acc["bursts"]["largest"]["bytes"] == 1400
+
+
+def test_flow_response_drops_ts_but_keeps_time_ms():
+    """The wire format must not grow a per-packet epoch timestamp.
+
+    Accounting needs ts internally, but the response drops it because a million
+    packets would carry a large redundant field.
+    """
+    lines = [
+        row(1, 100.0, 1, 1, 0, {"tcp.flags.syn": "1"}),
+        row(2, 100.2, 1, 2, 1400, {"tcp.flags.ack": "1"}),
+    ]
+    packets = packettrain.parse_rows(lines)
+    detail = packettrain.stream_detail(packets, 1)
+    for p in detail["packets"]:
+        assert "ts" not in p
+        assert "time_ms" in p
+    # Accounting still saw the real timestamps.
+    assert detail["accounting"]["unique_payload_bytes"]["client"] == 1400
+
+
+def test_accounting_does_not_mutate_input_packets():
+    """Accounting works on a copy, so the response packets stay as documented."""
+    lines = [
+        row(1, 100.0, 1, 1, 0, {"tcp.flags.syn": "1"}),
+        row(2, 100.2, 1, 2, 1400, {"tcp.flags.ack": "1"}),
+    ]
+    packets = packettrain.parse_rows(lines)
+    before = [dict(p) for p in packets]
+    packettrain.stream_detail(packets, 1)
+    for original, after in zip(before, packets):
+        assert original == after
