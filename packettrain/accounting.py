@@ -8,6 +8,7 @@ from .behavior import classify_stream
 from .https import analyze_https
 from .position import position_evidence
 from .accounting_tcp import tcp_accounting
+from .fingerprint import fingerprint_endpoint
 from .phases import stream_phases, transport_symptoms
 
 
@@ -92,9 +93,12 @@ def stream_detail(packets, stream):
     tcp_detail = tcp_accounting(accounting_input)
     phases = stream_phases(accounting_input)
     symptoms = transport_symptoms(accounting_input)
+    fingerprints = fingerprint_endpoint(accounting_input,
+                                        (summary["client"], summary["client_port"]))
     return {"summary": summary, "rtt_ms": round(rtt, 2) if rtt is not None else None,
             "rtt_source": source, "capture_side": side, "position": position,
             "accounting": tcp_detail, "phases": phases, "symptoms": symptoms,
+            "fingerprint": fingerprints,
             "handshake_legs_ms": [round(leg1, 3), round(leg2, 3)] if leg1 is not None and leg2 is not None else None,
             "packets": group, "facts": facts, "pattern": pattern,
             "https": https, "slicing": slicing_report(group),

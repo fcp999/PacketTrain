@@ -762,3 +762,123 @@ def test_flow_carries_phases_and_symptoms():
     assert detail["phases"]["phases"]
     assert detail["phases"]["thresholds"]["version"]
     assert any(s["symptom"] == "Recovery observed" for s in detail["symptoms"]["symptoms"])
+
+
+def test_option_parser_handles_repeats_and_padding():
+    """Option order is preserved, including repeated NOP and EOL padding."""
+    fp = packettrain.fingerprint
+    # mss 1460, sack-perm, ts, nop, window-scale 7  (the real Linux SYN bytes)
+    assert fp.parse_options("020405b40402080aab6d4ac00000000001030307") == \
+        ["mss", "sack", "ts", "nop", "ws"]
+    # Real Windows shape from ipv6SQUID: double nop after window scale.
+    assert fp.parse_options("020405b40103030801010402") == \
+        ["mss", "nop", "ws", "nop", "nop", "sack"]
+    # EOL terminates parsing and is not treated as an option.
+    assert fp.parse_options("020405b400") == ["mss"]
+    # Empty and malformed input must not raise.
+    assert fp.parse_options("") == []
+    assert fp.parse_options("02") == []
+    # A length that overruns the buffer is reported, not silently dropped.
+    assert fp.parse_options("021e02020405b4") == ["malformed_2"]
+
+
+def test_option_parser_reports_unknown_kind_by_number():
+    """An unrecognised option still shows up, rather than being dropped."""
+    fp = packettrain.fingerprint
+    # kind 30 (0x1e) with length 4 and two payload bytes -> reported by number,
+    # and parsing continues to the following option.
+    assert fp.parse_options("1e040000") == ["kind30"]
+    assert fp.parse_options("1e040000020405b4") == ["kind30", "mss"]
+
+
+def test_fingerprint_matches_linux_from_real_syn_bytes():
+    """The real Linux SYN from yum_001 matches the Linux signature."""
+    fp = packettrain.fingerprint
+    lines = [
+        row(1, 0.000, 1, 100, 0, {"tcp.flags.syn": "1", "ip.ttl": "64",
+                                   "tcp.options": "020405b40402080aab6d4ac00000000001030307",
+                                   "tcp.options.mss_val": "1460",
+                                   "tcp.options.wscale.shift": "7",
+                                   "tcp.options.sack_perm": "0402",
+                                   "tcp.options.timestamp.tsval": "2876066496",
+                                   "tcp.window_size": "64240"}),
+    ]
+    packets = packettrain.parse_rows(lines)
+    result = fp.fingerprint_endpoint(packets, ("192.0.2.1", 50000))
+    client = result["client"]
+    assert client["observed"] is True
+    assert client["option_order"] == ["mss", "sack", "ts", "nop", "ws"]
+    assert client["family"] == "Linux 4.x/5.x/6.x"
+    assert client["confidence"] == "moderate"
+    # Observed fields are reported whether or not a family matched.
+    assert client["mss"] == 1460 and client["wscale"] == 7
+
+
+def test_fingerprint_without_a_syn_reports_absence_not_a_guess():
+    """A stream with no SYN must say so rather than estimate a stack."""
+    fp = packettrain.fingerprint
+    packets = packettrain.parse_rows([row(1, 0.0, 1, 100, 1400, {"tcp.flags.ack": "1"})])
+    result = fp.fingerprint_endpoint(packets, ("192.0.2.1", 50000))
+    assert result["client"]["observed"] is False
+    assert "cannot be estimated" in result["client"]["note"]
+    assert result["server"]["observed"] is False
+
+
+def test_synack_is_marked_weaker_evidence_than_syn():
+    """A responder's signature is shaped by the client's offer."""
+    fp = packettrain.fingerprint
+    lines = [
+        row(1, 0.000, 1, 100, 0, {"tcp.flags.syn": "1",
+                                   "tcp.options": "020405b40402080a000000000000000001030307",
+                                   "tcp.options.mss_val": "1460",
+                                   "tcp.options.wscale.shift": "7",
+                                   "tcp.window_size": "64240"}),
+        row(2, 0.020, 1, 200, 0, {"tcp.flags.syn": "1", "tcp.flags.ack": "1",
+                                   "tcp.options": "020405b40402080a000000000000000001030307",
+                                   "tcp.options.mss_val": "1460",
+                                   "tcp.options.wscale.shift": "7",
+                                   "tcp.window_size": "65160"}),
+    ]
+    packets = packettrain.parse_rows(lines)
+    packets[1].update(src="198.51.100.2", dst="192.0.2.1", sport=443, dport=50000)
+    result = fp.fingerprint_endpoint(packets, ("192.0.2.1", 50000))
+    assert "moderate" in result["client"]["evidence_strength"]
+    assert "weak" in result["server"]["evidence_strength"]
+
+
+def test_fingerprint_never_claims_identity():
+    """The result must carry its limitation and refuse uptime inference."""
+    fp = packettrain.fingerprint
+    packets = packettrain.parse_rows([row(1, 0.0, 1, 100, 0, {
+        "tcp.flags.syn": "1", "tcp.options": "020405b400",
+        "tcp.options.mss_val": "1460", "tcp.window_size": "64240"})])
+    result = fp.fingerprint_endpoint(packets, ("192.0.2.1", 50000))
+    assert "not an identification" in result["limitation"]
+    assert "uptime is not inferred" in result["limitation"]
+
+
+def test_cross_connection_consistency_counts_families():
+    fp = packettrain.fingerprint
+    per_stream = [
+        {"client": {"family": "Linux 4.x/5.x/6.x"}, "server": {"family": "Linux 4.x/5.x/6.x"}},
+        {"client": {"family": "Linux 4.x/5.x/6.x"}, "server": {"family": "Windows 10/11"}},
+    ]
+    result = fp.cross_connection_consistency(per_stream)
+    counts = {(c["side"], c["family"]): c["connections"] for c in result["counts"]}
+    assert counts[("client", "Linux 4.x/5.x/6.x")] == 2
+    assert counts[("server", "Windows 10/11")] == 1
+    assert "not proof" in result["note"]
+
+
+def test_flow_carries_fingerprint():
+    lines = [
+        row(1, 0.0, 1, 100, 0, {"tcp.flags.syn": "1",
+                                 "tcp.options": "020405b40402080a000000000000000001030307",
+                                 "tcp.options.mss_val": "1460",
+                                 "tcp.options.wscale.shift": "7",
+                                 "tcp.window_size": "64240"}),
+    ]
+    packets = packettrain.parse_rows(lines)
+    detail = packettrain.stream_detail(packets, 1)
+    assert detail["fingerprint"]["client"]["observed"] is True
+    assert detail["fingerprint"]["signature_version"]

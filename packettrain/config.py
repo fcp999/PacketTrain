@@ -21,6 +21,7 @@ FIELDS = [
     "tls.handshake.type", "tls.record.content_type", "tls.handshake.extensions_server_name",
     "tls.handshake.extensions_alpn_str", "tls.handshake.version",
     "ip.ttl", "ipv6.hlim", "tcp.options.wscale.shift",
+    "tcp.options.sack_perm", "tcp.options.timestamp.tsval", "tcp.options",
 ]
 
 
