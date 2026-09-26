@@ -1,6 +1,9 @@
 import pytest
 
-import app as packettrain
+import app
+from packettrain import config as ptconfig
+
+packettrain = app
 
 
 def row(frame, ts, stream, seq, length, flags=None):
@@ -55,7 +58,7 @@ def test_https_needs_visible_hello():
 
 
 def test_files_stay_inside_mount(tmp_path, monkeypatch):
-    monkeypatch.setattr(packettrain, "PCAP_DIR", tmp_path)
+    monkeypatch.setattr(ptconfig, "PCAP_DIR", tmp_path)
     (tmp_path / "good.pcap").write_bytes(b"capture")
     (tmp_path / "link.pcap").symlink_to(tmp_path / "good.pcap")
     client = packettrain.app.test_client()
@@ -65,7 +68,7 @@ def test_files_stay_inside_mount(tmp_path, monkeypatch):
 
 
 def test_stream_endpoints_use_tshark_fields(tmp_path, monkeypatch):
-    monkeypatch.setattr(packettrain, "PCAP_DIR", tmp_path)
+    monkeypatch.setattr(ptconfig, "PCAP_DIR", tmp_path)
     (tmp_path / "sample.pcap").write_bytes(b"sample")
     lines = [row(1, 100.0, 3, 1, 0, {"tcp.flags.syn": "1"}),
              row(2, 100.2, 3, 2, 1460, {"tcp.flags.push": "1"})]
@@ -314,3 +317,43 @@ def test_flow_reports_slicing_for_stream():
     detail = packettrain.stream_detail(packets, 1)
     assert detail["slicing"]["sliced"] is True
     assert detail["slicing"]["lost_bytes"] == 1400
+
+
+def test_https_self_reports_undecoded_handshake():
+    """TLS records with no decoded handshake must say so, not read as 'no TLS'.
+
+    A sliced capture contains the record type but loses the handshake body, so
+    analyze_https previously returned None and the caller could not tell
+    "no TLS here" from "TLS present but unreadable".
+    """
+    lines = [
+        row(1, 0.0, 1, 1, 0, {"tcp.flags.syn": "1"}),
+        row(2, 0.2, 1, 2, 1400, {"tls.record.content_type": "22"}),
+    ]
+    packets = packettrain.parse_rows(lines)
+    tls = packettrain.analyze_https(packets, ("192.0.2.1", 50000))
+    assert tls is not None
+    assert tls["detected"] is False
+    assert tls["handshake_decoded"] is False
+    assert tls["behavior"] is None
+    assert "no handshake was decoded" in tls["limitation"]
+
+
+def test_https_absent_tls_still_returns_none():
+    """A stream with no TLS indication at all keeps the old behaviour."""
+    packets = packettrain.parse_rows([row(1, 0.0, 1, 1, 100, {"tcp.flags.ack": "1"})])
+    assert packettrain.analyze_https(packets, ("192.0.2.1", 50000)) is None
+
+
+def test_cipher_interval_has_both_names_and_agrees():
+    lines = [
+        row(1, 0.00, 1, 1, 300, {"tls.handshake.type": "1", "tls.record.content_type": "22"}),
+        row(2, 0.25, 1, 2, 90, {"tls.handshake.type": "2", "tls.record.content_type": "22"}),
+        row(3, 0.27, 1, 3, 900, {"tls.record.content_type": "23"}),
+    ]
+    packets = packettrain.parse_rows(lines)
+    for p in packets[1:]:
+        p.update(src="198.51.100.2", dst="192.0.2.1", sport=443, dport=50000)
+    tls = packettrain.analyze_https(packets, ("192.0.2.1", 50000))
+    assert tls["server_hello_to_first_record_ms"] == tls["server_hello_to_first_server_cipher_ms"]
+    assert tls["server_hello_to_first_record_ms"] == pytest.approx(20, abs=1)
