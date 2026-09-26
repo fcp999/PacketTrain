@@ -61,11 +61,19 @@ def burst_rate(group, data_direction, min_packets=BURST_MIN_PACKETS):
         capture_rate = payload_bits / (span_ms / 1000.0)
 
     tsval_rate = None
+    ts_reason = None
     ts_first = first.get("tsval")
     ts_last = last.get("tsval")
-    if ts_first is not None and ts_last is not None and ts_last > ts_first:
-        # Linux ticks are milliseconds, so the span is quantised; the rate is a
-        # lower bound on the burst and is reported as such.
+    present = [p.get("tsval") for p in run if p.get("tsval") is not None]
+    if len(present) < 2:
+        ts_reason = ("no TCP timestamp option on these packets, so the endpoint "
+                     "clock cannot be used as a cross-check")
+    elif ts_last is None or ts_first is None or ts_last <= ts_first:
+        # A tick is 1 ms on Linux, so a burst under a millisecond lands in one
+        # tick. Say so rather than returning nothing, which reads as a fault.
+        ts_reason = ("the whole burst falls inside one timestamp tick, so the "
+                     "sender clock cannot resolve it; the burst is under 1 ms")
+    else:
         tsval_rate = payload_bits / ((ts_last - ts_first) / 1000.0)
 
     return {"available": True,
@@ -74,8 +82,8 @@ def burst_rate(group, data_direction, min_packets=BURST_MIN_PACKETS):
             "span_ms": round(span_ms, 3),
             "capture_rate_mbps": round(capture_rate / 1e6, 2) if capture_rate else None,
             "tsval_rate_mbps": round(tsval_rate / 1e6, 2) if tsval_rate else None,
-            "tsval_span_ms": (ts_last - ts_first) if (ts_first is not None and ts_last is not None
-                                                      and ts_last > ts_first) else None,
+            "tsval_span_ms": (ts_last - ts_first) if tsval_rate is not None else None,
+            "tsval_note": ts_reason,
             "tsval_resolution_ms": 1,
             "run_index": best_index,
             "runs_before": best_index,

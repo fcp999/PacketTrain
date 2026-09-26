@@ -1218,3 +1218,41 @@ def test_burst_rate_reports_unavailable_without_a_run():
     burst = acct.burst_rate(group, "out")
     assert burst["available"] is False
     assert "min_packets" in burst
+
+
+def test_burst_rate_explains_an_unresolvable_timestamp():
+    """A burst inside one timestamp tick must say so, not return silence."""
+    import packettrain.accounting as acct
+    group = []
+    def add(frame, t, direction, length, tsval, ack=False):
+        group.append({"frame": frame, "time_ms": t, "direction": direction,
+                      "length": length, "tsval": tsval, "ack_flag": ack, "mss": 1460,
+                      "frame_length": length + 54, "retrans": False, "sack": False,
+                      "psh": False, "syn": False})
+    for i in range(6):
+        add(1 + i, 10.0 + i * 0.00002, "out", 1448, 900000)   # all one tick
+    add(20, 30.0, "in", 0, 900100, ack=True)
+
+    burst = acct.burst_rate(group, "out")
+    assert burst["available"] is True
+    assert burst["tsval_rate_mbps"] is None
+    assert "one timestamp tick" in burst["tsval_note"]
+
+
+def test_burst_rate_reports_missing_timestamps_separately():
+    """No timestamp option is a different outcome from a coarse one."""
+    import packettrain.accounting as acct
+    group = []
+    for i in range(6):
+        group.append({"frame": 1 + i, "time_ms": 10.0 + i * 0.002, "direction": "out",
+                      "length": 1448, "tsval": None, "ack_flag": False, "mss": 1460,
+                      "frame_length": 1502, "retrans": False, "sack": False,
+                      "psh": False, "syn": False})
+    group.append({"frame": 20, "time_ms": 30.0, "direction": "in", "length": 0,
+                  "tsval": 5, "ack_flag": True, "mss": 1460, "frame_length": 54,
+                  "retrans": False, "sack": False, "psh": False, "syn": False})
+
+    burst = acct.burst_rate(group, "out")
+    assert burst["available"] is True
+    assert burst["tsval_rate_mbps"] is None
+    assert "no TCP timestamp option" in burst["tsval_note"]
