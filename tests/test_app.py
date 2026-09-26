@@ -1175,3 +1175,46 @@ def test_match_reports_recurring_families_across_streams(tmp_path, monkeypatch):
         assert c["family"]
         assert c["connections"] >= 1
     assert "note" in body
+
+
+def test_burst_rate_measures_after_the_slow_start_ramp():
+    """A burst sample needs 5+ packets and reports where it came from."""
+    acc = packettrain.accounting_tcp
+    import packettrain.accounting as acct
+    # Two runs: a 2-packet slow-start opening and a 6-packet later run.
+    group = []
+    def add(frame, t, direction, length, tsval, ack=False):
+        group.append({"frame": frame, "time_ms": t, "direction": direction,
+                      "length": length, "tsval": tsval, "ack_flag": ack, "mss": 1460,
+                      "frame_length": length + 54, "retrans": False, "sack": False,
+                      "psh": False, "syn": False})
+    add(1, 0.0, "out", 1448, 100)
+    add(2, 0.1, "out", 1448, 101)          # only 2, below the minimum
+    add(3, 20.0, "in", 0, 200, ack=True)   # ACK closes the run
+    for i in range(6):                     # a qualifying 6-packet burst
+        add(4 + i, 40.0 + i * 0.002, "out", 1448, 300 + i)
+    add(20, 60.0, "in", 0, 400, ack=True)
+
+    burst = acct.burst_rate(group, "out")
+    assert burst["available"] is True
+    assert burst["packets"] == 6
+    # The 2-packet opening never qualifies, so it is not counted as a run at
+    # all: the sampler does not treat the slow-start ramp as a candidate.
+    assert burst["runs_before"] == 0
+    assert burst["payload_bytes"] == 6 * 1448
+    assert burst["capture_rate_mbps"] and burst["capture_rate_mbps"] > 0
+    assert burst["tsval_span_ms"] == 5
+
+
+def test_burst_rate_reports_unavailable_without_a_run():
+    """Too few consecutive packets must not produce a fabricated rate."""
+    import packettrain.accounting as acct
+    group = [{"frame": 1, "time_ms": 0.0, "direction": "out", "length": 1448,
+              "tsval": 1, "ack_flag": False, "mss": 1460, "frame_length": 1502,
+              "retrans": False, "sack": False, "psh": False, "syn": False},
+             {"frame": 2, "time_ms": 1.0, "direction": "in", "length": 0,
+              "tsval": 2, "ack_flag": True, "mss": 1460, "frame_length": 54,
+              "retrans": False, "sack": False, "psh": False, "syn": False}]
+    burst = acct.burst_rate(group, "out")
+    assert burst["available"] is False
+    assert "min_packets" in burst

@@ -83,6 +83,10 @@ def parse_rows(lines):
             # which is what a p0f-style signature keys on.
             "sack_perm": p["tcp.options.sack_perm"] != "",
             "has_timestamp": p["tcp.options.timestamp.tsval"] != "",
+            # Kept as a number: the endpoint clock measures when the sender
+            # handed the burst off, independent of the capture clock. Absent
+            # (None) when the timestamp option was not negotiated.
+            "tsval": num(p["tcp.options.timestamp.tsval"], None),
             "options_raw": p["tcp.options"],
         })
     return packets

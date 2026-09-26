@@ -12,6 +12,81 @@ from .fingerprint import fingerprint_endpoint
 from .phases import stream_phases, transport_symptoms
 
 
+# A rate sample needs enough packets that one scheduling hiccup
+# cannot dominate the elapsed time.
+BURST_MIN_PACKETS = 5
+
+def burst_rate(group, data_direction, min_packets=BURST_MIN_PACKETS):
+    """Estimate link rate from a run of back-to-back packets.
+
+    The first data flight is the worst sample available: it is slow start, so the
+    sender is still probing and the spacing reflects congestion response rather
+    than the link. This walks later runs instead, requiring a minimum number of
+    consecutive same-direction payload packets with no intervening ACK, and
+    reports where the sample came from.
+
+    Two rates are returned. The capture rate uses capture timestamps, which can
+    precede physical transmission. The tsval rate uses the sender's own clock, so
+    it is independent of the capture point, but its resolution is coarse (Linux
+    ticks at 1 ms), so it bounds a short burst rather than resolving it.
+    """
+    runs = []
+    current = []
+    for p in group:
+        if p["direction"] == data_direction and p["length"] > 0:
+            current.append(p)
+            continue
+        if p["direction"] != data_direction and p["ack_flag"]:
+            if len(current) >= min_packets:
+                runs.append(current)
+            current = []
+    if len(current) >= min_packets:
+        runs.append(current)
+
+    if not runs:
+        return {"available": False,
+                "reason": f"no run of {min_packets} consecutive payload packets",
+                "min_packets": min_packets}
+
+    # Prefer the longest run: the least sensitive to a single scheduling hiccup.
+    # Runs before that one are the slow-start ramp, and its index is reported.
+    best_index = max(range(len(runs)), key=lambda i: len(runs[i]))
+    run = runs[best_index]
+    first, last = run[0], run[-1]
+    payload_bits = sum(p["length"] for p in run) * 8
+    span_ms = last["time_ms"] - first["time_ms"]
+
+    capture_rate = None
+    if span_ms > 0:
+        capture_rate = payload_bits / (span_ms / 1000.0)
+
+    tsval_rate = None
+    ts_first = first.get("tsval")
+    ts_last = last.get("tsval")
+    if ts_first is not None and ts_last is not None and ts_last > ts_first:
+        # Linux ticks are milliseconds, so the span is quantised; the rate is a
+        # lower bound on the burst and is reported as such.
+        tsval_rate = payload_bits / ((ts_last - ts_first) / 1000.0)
+
+    return {"available": True,
+            "packets": len(run),
+            "payload_bytes": sum(p["length"] for p in run),
+            "span_ms": round(span_ms, 3),
+            "capture_rate_mbps": round(capture_rate / 1e6, 2) if capture_rate else None,
+            "tsval_rate_mbps": round(tsval_rate / 1e6, 2) if tsval_rate else None,
+            "tsval_span_ms": (ts_last - ts_first) if (ts_first is not None and ts_last is not None
+                                                      and ts_last > ts_first) else None,
+            "tsval_resolution_ms": 1,
+            "run_index": best_index,
+            "runs_before": best_index,
+            "sample_frame_range": [first["frame"], last["frame"]],
+            "min_packets": min_packets,
+            "note": ("Sampled after the slow-start ramp. The capture rate can exceed "
+                     "the link because capture timestamps may precede transmission; "
+                     "the tsval rate is quantised to the sender's tick and so bounds "
+                     "the burst from below.")}
+
+
 def summarize(packets):
     groups = defaultdict(list)
     for packet in packets:
@@ -80,6 +155,7 @@ def stream_detail(packets, stream):
                 flight.append(p)
     mss = sorted({p["mss"] for p in group if p["syn"] and p["mss"]})
     sizes = sorted(p["frame_length"] for p in group if p["length"])
+    burst = burst_rate(group, data_direction)
     facts = {"mss": mss, "max_payload": max((p["length"] for p in group), default=0),
              "typical_frame_bytes": sizes[len(sizes) // 2] if sizes else None,
              "large_capture_records": sum(p["length"] > 1460 for p in group),
@@ -87,6 +163,7 @@ def stream_detail(packets, stream):
              "first_flight_bytes": sum(p["length"] for p in flight),
              "first_flight_span_ms": round(flight[-1]["time_ms"] - flight[0]["time_ms"], 3)
              if flight else None,
+             "burst": burst,
              "retransmissions": sum(p["retrans"] for p in group),
              "sack_packets": sum(p["sack"] for p in group),
              "psh_packets": sum(p["psh"] for p in group)}
