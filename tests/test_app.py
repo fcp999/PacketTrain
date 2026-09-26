@@ -1038,3 +1038,63 @@ def test_idle_never_rewrites_timestamps():
     before = [p["time_ms"] for p in packets]
     idle.timeline(packets, mode="smart")
     assert [p["time_ms"] for p in packets] == before
+
+
+def test_flow_playback_absent_unless_requested():
+    """Compression is a playback concern and must not be computed by default."""
+    lines = [
+        row(1, 0.0, 1, 100, 500, {"tcp.flags.ack": "1", "tcp.window_size": "64240"}),
+        row(2, 30.0, 1, 600, 500, {"tcp.flags.ack": "1", "tcp.window_size": "64240"}),
+    ]
+    packets = packettrain.parse_rows(lines)
+    detail = packettrain.stream_detail(packets, 1)
+    assert "playback" not in detail
+
+
+def _real_file_client(tmp_path, monkeypatch):
+    """A test client with PCAP_DIR pointing at a directory holding one capture.
+
+    Path validation runs before playback validation, so a nonexistent file
+    would 404 first and never reach the mode or speed checks.
+    """
+    monkeypatch.setattr(ptconfig, "PCAP_DIR", tmp_path)
+    (tmp_path / "sample.pcap").write_bytes(b"sample")
+    lines = [
+        row(1, 0.0, 1, 100, 500, {"tcp.flags.ack": "1", "tcp.window_size": "64240"}),
+        row(2, 30.0, 1, 600, 500, {"tcp.flags.ack": "1", "tcp.window_size": "64240"}),
+    ]
+
+    class Completed:
+        returncode = 0
+        stdout = "\n".join(lines) + "\n"
+        stderr = ""
+
+    monkeypatch.setattr(packettrain.subprocess, "run", lambda *a, **k: Completed())
+    return packettrain.app.test_client()
+
+
+def test_flow_playback_requires_a_known_mode(tmp_path, monkeypatch):
+    client = _real_file_client(tmp_path, monkeypatch)
+    r = client.get("/api/flow?file=sample.pcap&stream=1&mode=nonsense")
+    assert r.status_code == 400
+    assert b"mode" in r.data.lower()
+
+
+def test_flow_playback_rejects_bad_speed(tmp_path, monkeypatch):
+    client = _real_file_client(tmp_path, monkeypatch)
+    assert client.get("/api/flow?file=sample.pcap&stream=1&speed=abc").status_code == 400
+    assert client.get("/api/flow?file=sample.pcap&stream=1&speed=99999").status_code == 400
+
+
+def test_flow_playback_compresses_a_long_gap(tmp_path, monkeypatch):
+    """A requested mode returns a timeline with the idle gap compressed."""
+    client = _real_file_client(tmp_path, monkeypatch)
+    r = client.get("/api/flow?file=sample.pcap&stream=1&mode=smart&speed=1")
+    assert r.status_code == 200
+    playback = r.json["playback"]
+    assert playback["analysis"]["mode"] == "smart"
+    labels = [s.get("label") for s in playback["segments"] if s["kind"] == "compressed"]
+    assert labels and labels[0].startswith("Idle interval compressed")
+    # Every packet is still present exactly once.
+    frames = [s["frame"] for s in playback["segments"] if s["kind"] == "packet"]
+    assert frames == [1, 2]

@@ -67,7 +67,28 @@ def flow():
     if not re.fullmatch(r"\d{1,8}", raw):
         abort(400, "Invalid stream")
     packets = read_capture(capture_path(request.args.get("file", "")))
-    return jsonify(stream_detail(packets, int(raw)))
+    detail = stream_detail(packets, int(raw))
+    # Compression is a playback concern, so it is computed only when asked for.
+    mode = request.args.get("mode", "")
+    # Validate speed whenever it is supplied, even without a mode, rather than
+    # silently ignoring a value the caller took the trouble to send.
+    speed_arg = request.args.get("speed", "")
+    speed = 1.0
+    if speed_arg:
+        try:
+            speed = float(speed_arg)
+        except ValueError:
+            abort(400, "Invalid speed")
+        if not 0.01 <= speed <= 1000:
+            abort(400, "Speed out of range")
+    if mode:
+        if mode not in idle.MODES:
+            abort(400, "Unknown playback mode")
+        # Pass the packets unchanged: the gap classifier consults the same
+        # sequence accounting as /api/flow, so a partial projection would break
+        # the outstanding-payload check it relies on.
+        detail["playback"] = idle.timeline(detail["packets"], mode=mode, speed=speed)
+    return jsonify(detail)
 
 
 @app.get("/api/slicing")
