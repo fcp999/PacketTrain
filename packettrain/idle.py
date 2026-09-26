@@ -32,22 +32,21 @@ TRANSPORT_WAIT_REASONS = {
 }
 
 
-def _outstanding_within(packets, start_ms, end_ms):
+def _outstanding_within(series, start_ms, end_ms):
     """Whether payload was unacknowledged at any point from start to end.
 
-    Asking only about the instant before the gap misses the case where the
-    outstanding reading falls inside the gap itself, which is exactly when a
-    wait is hiding.
+    Takes a prebuilt outstanding series: rebuilding it per gap made the whole
+    analysis quadratic and pinned a CPU core per request. Asking only about the
+    instant before the gap would also miss an outstanding reading that falls
+    inside the gap, which is exactly when a wait is hiding.
     """
-    from .accounting_tcp import outstanding_bytes
-    series = outstanding_bytes(packets)["series"]
     return any(pt["time_ms"] is not None
                and start_ms <= pt["time_ms"] <= end_ms
                and pt["outstanding"] > 0
                for pt in series)
 
 
-def _gap_reason(packets, before, after):
+def _gap_reason(packets, before, after, outstanding_series):
     """Classify the quiet interval between two packets.
 
     Returns (compressible, reason_key). Compression is allowed only for
@@ -66,7 +65,7 @@ def _gap_reason(packets, before, after):
     if any(p.get("syn") and not p.get("ack_flag") for p in preceding) and \
             not any(p.get("syn") and p.get("ack_flag") for p in preceding):
         return False, "handshake_retry"
-    if _outstanding_within(packets, before["time_ms"], after["time_ms"]):
+    if _outstanding_within(outstanding_series, before["time_ms"], after["time_ms"]):
         return False, "unresolved_outstanding"
 
     # Nothing in the packet stream explains the gap. That is not the same as
@@ -85,6 +84,15 @@ def analyze_gaps(packets, mode="smart", speed=1.0, trigger_s=PLAYBACK_TRIGGER_S)
         return {"mode": mode, "mode_version": MODES["version"], "gaps": [],
                 "compressed_seconds": 0.0,
                 "limitation": None}
+
+    # Built once for the whole stream. Rebuilding it inside the gap loop was
+    # quadratic in packet count and dominated the request. Faithful mode never
+    # classifies a gap, so it does not pay for this at all.
+    if mode == "faithful":
+        outstanding_series = []
+    else:
+        from .accounting_tcp import outstanding_bytes
+        outstanding_series = outstanding_bytes(ordered)["series"]
 
     gaps = []
     compressed = 0.0
@@ -105,7 +113,7 @@ def analyze_gaps(packets, mode="smart", speed=1.0, trigger_s=PLAYBACK_TRIGGER_S)
         # Both smart and fast preserve transport waits. Fast may compress a
         # wait, but only with an explicit label, so it is still reported here
         # rather than silently dropped.
-        compressible, reason = _gap_reason(ordered, before, after)
+        compressible, reason = _gap_reason(ordered, before, after, outstanding_series)
         too_short = playback_s < trigger_s
 
         if compressible and not too_short:
