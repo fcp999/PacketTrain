@@ -239,13 +239,38 @@ def analyze_https(packets, client):
                                 (server_hello is None or p["ts"] >= server_hello["ts"])), None)
     sni = next((p["tls_sni"] for p in client_packets if p.get("tls_sni")), None)
     alpn = next((p["tls_alpn"] for p in client_packets if p.get("tls_alpn")), None)
-    # Drop visible handshake packets and the first encrypted flights on both
-    # sides. This is deliberately approximate; coalesced records remain opaque.
-    excluded = {p["frame"] for p in ordered if p.get("tls_handshake")}
-    excluded.update(p["frame"] for p in (first_client_cipher, first_server_cipher) if p)
-    traffic = [p for p in ordered if p["frame"] not in excluded]
-    behavior = classify_stream(traffic, client)
-    return {
+
+    # Guard: a TLS-bearing stream whose records the decoder did not identify
+    # must not be classified. Handshake, ChangeCipherSpec and undecoded
+    # ciphertext all look like one-directional payload, which would otherwise
+    # produce a confident "bulk upload/download" label from key material.
+    decoded_records = sum(1 for p in ordered if p.get("tls_record"))
+    undecoded_note = None
+    if decoded_records == 0:
+        undecoded_note = ("TLS records present but the decoder identified no record types, "
+                          "so no encrypted traffic shape can be classified.")
+        behavior = {"label": "Undetermined encrypted traffic", "confidence": "unknown",
+                    "evidence": [f"{len(ordered)} records with no decoded TLS record type",
+                                 "Decoded record types unavailable; handshake bytes are not payload"],
+                    "metrics": {"decoded_records": 0},
+                    "scope": "Traffic behavior not established for this stream."}
+    elif not encrypted:
+        undecoded_note = ("No application-data (type 23) records were identified, so the "
+                          "stream carries no classifiable encrypted payload.")
+        behavior = {"label": "Handshake / control only", "confidence": "moderate",
+                    "evidence": [f"{decoded_records} decoded TLS records, none application-data",
+                                 "No encrypted payload records to classify"],
+                    "metrics": {"decoded_records": decoded_records, "application_data_records": 0},
+                    "scope": "Traffic behavior not established; no encrypted payload observed."}
+    else:
+        # Drop visible handshake packets and the first encrypted flights on both
+        # sides. This is deliberately approximate; coalesced records remain opaque.
+        excluded = {p["frame"] for p in ordered if p.get("tls_handshake")}
+        excluded.update(p["frame"] for p in (first_client_cipher, first_server_cipher) if p)
+        traffic = [p for p in ordered if p["frame"] not in excluded]
+        behavior = classify_stream(traffic, client)
+
+    result = {
         "detected": True, "sni": sni, "alpn_offered": alpn,
         "client_hello_frame": hello["frame"] if hello else None,
         "server_hello_frame": server_hello["frame"] if server_hello else None,
@@ -253,9 +278,14 @@ def analyze_https(packets, client):
         "server_hello_to_first_server_cipher_ms": elapsed(first_server_cipher, server_hello),
         "first_client_cipher_frame": first_client_cipher["frame"] if first_client_cipher else None,
         "first_server_cipher_frame": first_server_cipher["frame"] if first_server_cipher else None,
+        "decoded_records": decoded_records,
+        "undecoded_records": decoded_records == 0,
         "behavior": behavior,
         "limitation": "Ciphertext cannot identify an HTTP method, status, URL, file, or exact request boundary. TLS 1.3 encrypts most handshake messages; outer type 23 can still be handshake data. Timings at one capture point include path delay.",
     }
+    if undecoded_note:
+        result["limitation"] = undecoded_note + " " + result["limitation"]
+    return result
 
 
 def summarize(packets):

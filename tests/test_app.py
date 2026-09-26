@@ -178,3 +178,66 @@ def test_periodic_polling_and_interactive_exchange():
 def test_short_exchange_and_control_only():
     assert classify([traffic(0, "client", 75), traffic(.2, "server", 800)])["label"] == "Request/response pattern"
     assert classify([traffic(0, "client", 0, syn=True)])["label"] == "Connection attempt"
+
+
+def test_tls_stream_without_decoded_records_is_not_classified():
+    """A detected hello with no decoded record types must not be classified.
+
+    analyze_https returns None when no hello is found, so the guard is only
+    reachable once a handshake type has been extracted. That is the real risk
+    case: the card renders, record types are missing, and the remaining
+    one-directional bytes would otherwise be read as an encrypted traffic
+    pattern.
+    """
+    lines = [
+        row(1, 0.00, 1, 1, 0, {"tcp.flags.syn": "1"}),
+        row(2, 0.02, 1, 2, 0, {"tcp.flags.syn": "1", "tcp.flags.ack": "1"}),
+        row(3, 0.03, 1, 3, 0, {"tcp.flags.ack": "1"}),
+        # Hello detected -> the early "no hello" return does not fire.
+        row(4, 0.04, 1, 4, 300, {"tls.handshake.type": "1"}),
+    ]
+    # A large client->server flight with no decoded TLS record type at all.
+    for i in range(40):
+        lines.append(row(5 + i, 0.05 + i * 0.001, 1, 5 + i, 1400, {}))
+    packets = packettrain.parse_rows(lines)
+    tls = packettrain.analyze_https(packets, ("192.0.2.1", 50000))
+    assert tls is not None
+    assert tls["decoded_records"] == 0
+    assert tls["undecoded_records"] is True
+    assert tls["behavior"]["label"] == "Undetermined encrypted traffic"
+    assert tls["behavior"]["confidence"] == "unknown"
+    assert "no record types" in tls["limitation"].lower()
+
+
+def test_tls_with_only_handshake_records_reports_no_payload():
+    """Type 22/20 only means there is no encrypted payload to classify."""
+    lines = [
+        row(1, 0.00, 1, 1, 200, {"tls.handshake.type": "1", "tls.record.content_type": "22"}),
+        row(2, 0.25, 1, 2, 90, {"tls.handshake.type": "2", "tls.record.content_type": "22"}),
+    ]
+    packets = packettrain.parse_rows(lines)
+    for p in (packets[1],):
+        p.update(src="198.51.100.2", dst="192.0.2.1", sport=443, dport=50000)
+    tls = packettrain.analyze_https(packets, ("192.0.2.1", 50000))
+    assert tls["behavior"]["label"] == "Handshake / control only"
+    assert tls["behavior"]["metrics"]["application_data_records"] == 0
+
+
+def test_tls_with_application_data_still_classifies_normally():
+    """The guard must not suppress genuine encrypted-payload classification."""
+    lines = [
+        row(1, 0.00, 1, 1, 200, {"tls.handshake.type": "1", "tls.record.content_type": "22"}),
+        row(2, 0.25, 1, 2, 90, {"tls.handshake.type": "2", "tls.record.content_type": "22"}),
+    ]
+    for i in range(50):
+        lines.append(row(3 + i, 0.30 + i * 0.01, 1, 3 + i, 9000,
+                         {"tls.record.content_type": "23"} if i else
+                         {"tls.record.content_type": "23"}))
+    packets = packettrain.parse_rows(lines)
+    # frames 3,4,... are server-origin: override them
+    for p in packets[2:]:
+        p.update(src="198.51.100.2", dst="192.0.2.1", sport=443, dport=50000)
+    tls = packettrain.analyze_https(packets, ("192.0.2.1", 50000))
+    assert tls["behavior"]["label"] == "Bulk download pattern"
+    assert tls["behavior"]["confidence"] == "high"
+    assert tls["undecoded_records"] is False
