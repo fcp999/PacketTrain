@@ -79,6 +79,11 @@ def parse_rows(lines):
             # Window scale shift advertised in this packet's own options, if any.
             # Only SYNs carry it; the value in a SYN's window field is unscaled.
             "wscale": num(p["tcp.options.wscale.shift"], -1),
+            # Fingerprint inputs. Raw option bytes preserve order and padding,
+            # which is what a p0f-style signature keys on.
+            "sack_perm": p["tcp.options.sack_perm"] != "",
+            "has_timestamp": p["tcp.options.timestamp.tsval"] != "",
+            "options_raw": p["tcp.options"],
         })
     return packets
 
