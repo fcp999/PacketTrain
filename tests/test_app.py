@@ -623,3 +623,14 @@ def test_accounting_does_not_mutate_input_packets():
     packettrain.stream_detail(packets, 1)
     for original, after in zip(before, packets):
         assert original == after
+
+
+def test_static_assets_are_served_and_scoped():
+    """The vendored bundle is reachable, and only from static/."""
+    client = packettrain.app.test_client()
+    ok = client.get("/static/plotly.min.js")
+    assert ok.status_code == 200
+    assert b"plotly.js v2" in ok.data[:80]
+    # Path traversal must not escape the static directory.
+    assert client.get("/static/../app.py").status_code in (400, 404)
+    assert client.get("/static/..%2fapp.py").status_code in (400, 404)
