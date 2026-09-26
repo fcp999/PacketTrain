@@ -71,6 +71,7 @@ def parse_rows(lines):
             "tls_sni": p["tls.handshake.extensions_server_name"],
             "tls_alpn": p["tls.handshake.extensions_alpn_str"],
             "tls_version": p["tls.handshake.version"],
+            "ttl": num(p["ip.ttl"]) or num(p["ipv6.hlim"]),
         })
     return packets
 

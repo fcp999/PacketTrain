@@ -371,3 +371,63 @@ def test_handshake_decoded_is_reported_on_both_paths():
     tls = packettrain.analyze_https(packets, ("192.0.2.1", 50000))
     assert tls["detected"] is True
     assert tls["handshake_decoded"] is True
+
+
+def test_position_evidence_reports_observations_and_side():
+    """Position carries observations, not just a side string."""
+    lines = [
+        row(1, 0.000, 1, 1, 0, {"tcp.flags.syn": "1"}),
+        row(2, 0.100, 1, 2, 0, {"tcp.flags.syn": "1", "tcp.flags.ack": "1"}),
+        row(3, 0.101, 1, 3, 0, {"tcp.flags.ack": "1"}),
+    ]
+    packets = packettrain.parse_rows(lines)
+    ev = packettrain.position_evidence(packets, ("192.0.2.1", 50000), (100.0, 1.0))
+    assert ev["side"] == "client"
+    assert ev["confidence"] in {"moderate", "high"}
+    kinds = {o["kind"] for o in ev["evidence"]}
+    assert "handshake-intervals" in kinds
+    assert ev["evidence"][0]["leg_syn_to_synack_ms"] == 100.0
+
+
+def test_position_evidence_ambiguous_ttl_keeps_interval_answer():
+    """Two endpoints at a common initial TTL must not silently pick one.
+
+    TTL cannot say which endpoint is nearer, so the observation is surfaced and
+    the handshake interval decides - rather than TTL quietly winning.
+    """
+    lines = [
+        row(1, 0.000, 1, 1, 0, {"tcp.flags.syn": "1", "ip.ttl": "64"}),
+        row(2, 0.100, 1, 2, 0, {"tcp.flags.syn": "1", "tcp.flags.ack": "1", "ip.ttl": "128"}),
+        row(3, 0.101, 1, 3, 0, {"tcp.flags.ack": "1"}),
+    ]
+    packets = packettrain.parse_rows(lines)
+    # The SYN-ACK comes from the server, so it needs the server's address and
+    # port; row() defaults to the client tuple.
+    packets[1].update(src="198.51.100.2", dst="192.0.2.1", sport=443, dport=50000)
+    ev = packettrain.position_evidence(packets, ("192.0.2.1", 50000), (100.0, 1.0))
+    assert ev["side"] == "client"
+    assert any(o["kind"] == "ttl-pair" for o in ev["evidence"])
+
+
+def test_position_evidence_without_handshake_is_unknown_not_absent():
+    """A sliced/mid-stream capture still returns observations and says why."""
+    packets = packettrain.parse_rows([row(1, 0.0, 1, 1, 1400, {"ip.ttl": "64"})])
+    ev = packettrain.position_evidence(packets, ("192.0.2.1", 50000), (None, None))
+    assert ev["side"] == "unknown"
+    assert ev["evidence"][0]["kind"] == "handshake-intervals"
+    assert ev["evidence"][0]["leg_syn_to_synack_ms"] is None
+    assert any("Handshake legs unavailable" in o.get("note", "") for o in ev["evidence"])
+
+
+def test_flow_carries_position_object():
+    lines = [
+        row(1, 0.000, 1, 1, 0, {"tcp.flags.syn": "1", "ip.ttl": "64"}),
+        row(2, 0.100, 1, 2, 0, {"tcp.flags.syn": "1", "tcp.flags.ack": "1", "ip.ttl": "64"}),
+        row(3, 0.101, 1, 3, 0, {"tcp.flags.ack": "1"}),
+    ]
+    packets = packettrain.parse_rows(lines)
+    packets[1].update(src="198.51.100.2", dst="192.0.2.1", sport=443, dport=50000)
+    detail = packettrain.stream_detail(packets, 1)
+    assert detail["capture_side"] == "client"
+    assert detail["position"]["side"] == "client"
+    assert isinstance(detail["position"]["evidence"], list)

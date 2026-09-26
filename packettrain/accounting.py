@@ -6,6 +6,7 @@ from flask import abort
 from .decode import slicing_report
 from .behavior import classify_stream
 from .https import analyze_https
+from .position import position_evidence
 
 
 def summarize(packets):
@@ -44,12 +45,9 @@ def stream_detail(packets, stream):
                   and synack and p["time_ms"] > synack["time_ms"]), None)
     leg1 = synack["time_ms"] - syn["time_ms"] if syn and synack else None
     leg2 = third["time_ms"] - synack["time_ms"] if third and synack else None
-    side = "unknown"
-    if leg1 is not None and leg2 is not None and min(leg1, leg2) >= 0:
-        if leg1 >= 3 * max(leg2, 0.001):
-            side = "client"  # SYN travels and SYN-ACK returns; final ACK is nearby.
-        elif leg2 >= 3 * max(leg1, 0.001):
-            side = "server"  # SYN-ACK is nearby; final ACK makes the round trip.
+    position = position_evidence(group, (summary["client"], summary["client_port"]),
+                                 (leg1, leg2))
+    side = position["side"]
     rtts = sorted(p["ack_rtt_ms"] for p in group if 0 < p["ack_rtt_ms"] < 60_000)
     if side != "unknown":
         rtt = leg1 if side == "client" else leg2
@@ -85,7 +83,7 @@ def stream_detail(packets, stream):
              "sack_packets": sum(p["sack"] for p in group),
              "psh_packets": sum(p["psh"] for p in group)}
     return {"summary": summary, "rtt_ms": round(rtt, 2) if rtt is not None else None,
-            "rtt_source": source, "capture_side": side,
+            "rtt_source": source, "capture_side": side, "position": position,
             "handshake_legs_ms": [round(leg1, 3), round(leg2, 3)] if leg1 is not None and leg2 is not None else None,
             "packets": group, "facts": facts, "pattern": pattern,
             "https": https, "slicing": slicing_report(group),
