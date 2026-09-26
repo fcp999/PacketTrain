@@ -110,15 +110,18 @@ function showSkipLabel(gap){let el=$('skipLabel');if(!el){el=document.createElem
 function hideSkipLabel(){let el=$('skipLabel');if(el)el.style.display='none'}
 async function loadPlayback(){playback=null;if(!flow||!flow.summary)return;const mode=$('pmode').value;const speed=speedValue();try{const d=await api(BASE+'/api/flow?file='+encodeURIComponent($('file').value)+'&stream='+flow.summary.id+'&mode='+encodeURIComponent(mode)+'&speed='+speed);playback=d.playback||null}catch(e){playback=null}
  // Report what was compressed without changing any packet timing.
- const note=$('playbackNote');if(!note)return;if(!playback){note.textContent='';return}
- const a=playback.analysis;const labels=playback.segments.filter(s=>s.kind==='compressed');
- // Render last: the chart reads the playback segments and the axis bounds, so
- // both must be settled. Calling it earlier drew a stale axis and no gaps.
+ // Re-render now that playback exists: this is what draws the gap lines. The
+ // chart already drew its axis and arrows from build(), so the two renders are
+ // deliberate rather than duplicated.
  renderBounce();
+ const note=$('playbackNote');
+ if(!playback){if(note)note.textContent='';return}
+ const a=playback.analysis;const labels=playback.segments.filter(s=>s.kind==='compressed');
+ if(!note)return;
  if(!labels.length){note.textContent=mode==='faithful'?'Faithful playback: captured timing preserved.':'No interval qualified for compression at this speed.';return}
  note.textContent=`${labels.length} interval(s) compressed, ${a.compressed_seconds.toFixed(1)} s of playback saved. ${a.limitation}`;}
 function build(){stop();events=[];playback=null;const packets=flow.packets,rate=Number($('rate').value)||1000;captureSide=$('side').value==='auto'?flow.capture_side:$('side').value;const override=Number($('rttOverride').value),rtt=override>0?override:flow.rtt_ms,trace=flow.facts||{},frameBytes=trace.typical_frame_bytes;autoSpeedApplied=applyAutoSpeed(rtt);$('packetCount').textContent=packets.length;$('rtt').innerHTML=rtt?`${rtt.toFixed(1)} <small>ms</small>`:'—';$('serialize').innerHTML=frameBytes?`${(frameBytes*8/(rate*1000)).toFixed(2)} <small>ms / ${frameBytes} B</small>`:'—';$('bdp').innerHTML=rtt?`${(rate*1000*rtt/8/1000).toFixed(1)} <small>kB</small>`:'—';$('meta').textContent=`Effective capture side: ${captureSide}${flow.capture_side!==captureSide?' (handshake said: '+flow.capture_side+')':''}${flow.handshake_legs_ms?' ['+flow.handshake_legs_ms.join(' / ')+' ms]':''}. RTT source: ${override>0?'manual override':flow.rtt_source}. ${flow.note}`;
- showPattern(flow.pattern);showHttps(flow.https);showSlicing(flow.slicing);renderGraphs();showPosition(flow.position);showPhases(flow.phases);showSymptoms(flow.symptoms);showFingerprint(flow.fingerprint);loadPlayback();
+ showPattern(flow.pattern);showHttps(flow.https);showSlicing(flow.slicing);renderGraphs();showPosition(flow.position);showPhases(flow.phases);showSymptoms(flow.symptoms);showFingerprint(flow.fingerprint);renderBounce();loadPlayback();
  const facts=[trace.mss?.length?'Advertised MSS: '+trace.mss.join(' / ')+' B':'MSS unavailable',trace.large_capture_records?`${trace.large_capture_records} large capture records (GRO/LRO or jumbo)`:'',trace.first_flight_packets?`First data flight: ${trace.first_flight_packets} captured records / ${trace.first_flight_bytes.toLocaleString()} B`:'',`${trace.retransmissions||0} retransmissions · ${trace.sack_packets||0} SACK records · ${trace.psh_packets||0} PSH records`];$('facts').textContent=facts.filter(Boolean).join('  •  ');$('packetCount').previousElementSibling.textContent='Captured TCP records';
  const modeledFlight=trace.first_flight_bytes*8/(rate*1000),observedFlight=trace.first_flight_span_ms;
  $('modelWarning').textContent=trace.first_flight_packets>1&&observedFlight>0&&modeledFlight>observedFlight*5?`At ${rate} Mb/s this first flight needs about ${modeledFlight.toFixed(1)} ms of serialization, yet its frame timestamps span ${observedFlight.toFixed(3)} ms. The model rate is not the observed capture-side egress rate; packets may be timestamped before transmission.`:'';
