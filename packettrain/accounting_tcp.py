@@ -12,15 +12,44 @@ BURST_GAP_S = 0.2
 SEQ_SPACE = 1 << 32
 
 
+def initial_sequence(packets, from_client):
+    """The initial sequence number a direction opened with, or None.
+
+    Sequence numbers on the wire are absolute 32-bit values, so every
+    comparison has to be made relative to the ISN rather than to zero.
+    """
+    wanted = "out" if from_client else "in"
+    for p in packets:
+        if p.get("syn") and p["direction"] == wanted:
+            return p["seq"] % SEQ_SPACE
+    # No SYN captured: fall back to the first payload record of that direction so
+    # a mid-stream capture still produces a consistent relative view.
+    first = next((p for p in packets
+                  if p["direction"] == wanted and p["length"] > 0), None)
+    return first["seq"] % SEQ_SPACE if first else None
+
+
+def relative(value, base):
+    """Express an absolute sequence number relative to an initial one.
+
+    Wraps correctly when the value sits below the base in absolute terms.
+    """
+    if base is None:
+        return value % SEQ_SPACE
+    return (value - base) % SEQ_SPACE
+
+
 def _seq_ranges(packets, from_client):
-    """Collect (start, end) payload sequence ranges for one direction.
+    """Collect (start, end) payload sequence ranges for one direction, relative
+    to that direction's initial sequence number.
 
     Handles wraparound by splitting a range that crosses 2^32.
     """
+    base = initial_sequence(packets, from_client)
     ranges = []
     for p in packets:
         if (p["direction"] == ("out" if from_client else "in")) and p["length"] > 0:
-            start = p["seq"] % SEQ_SPACE
+            start = relative(p["seq"], base)
             end = start + p["length"]
             if end > SEQ_SPACE:
                 ranges.append((start, SEQ_SPACE))
@@ -92,6 +121,18 @@ def scaled_window(packets):
                            "reported unscaled rather than guessed.")}
 
 
+def _timestamp(packet):
+    """Seconds for ordering, accepting either wire form.
+
+    Stream accounting runs on packets that keep "ts"; the /api/flow response
+    drops it in favour of "time_ms". Both are valid inputs here.
+    """
+    if packet.get("ts") is not None:
+        return packet["ts"]
+    ms = packet.get("time_ms")
+    return (ms / 1000.0) if ms is not None else 0.0
+
+
 def outstanding_bytes(packets):
     """Observed unacknowledged payload over time, per direction.
 
@@ -101,21 +142,37 @@ def outstanding_bytes(packets):
     """
     series = []
     for from_client, label in ((True, "out"), (False, "in")):
-        sent = _seq_ranges(packets, from_client)
-        if not sent:
+        sent_packets = [p for p in packets
+                        if p["direction"] == ("out" if from_client else "in")
+                        and p["length"] > 0]
+        if not sent_packets:
             continue
-        for p in packets:
-            if "ack" not in p or p["direction"] != ("in" if from_client else "out"):
-                continue
-            acked = p["ack"] % SEQ_SPACE
-            open_ranges = []
-            for start, end in sent:
-                if end <= acked:
-                    continue
-                open_ranges.append((max(start, acked), end))
-            series.append({"time_ms": p.get("time_ms"), "direction": label,
+        base = initial_sequence(packets, from_client)
+        acks = [p for p in packets
+                if p["direction"] == ("in" if from_client else "out")
+                and p.get("ack") is not None and p.get("ack") != 0]
+        # Walk both series in timestamp order, growing the sent set as ACKs
+        # arrive. Counting payload sent AFTER an ACK would report data as
+        # outstanding before it was ever transmitted.
+        sent_packets.sort(key=_timestamp)
+        acks.sort(key=_timestamp)
+        sent_so_far = []
+        cursor = 0
+        for ack_packet in acks:
+            while (cursor < len(sent_packets)
+                   and _timestamp(sent_packets[cursor]) <= _timestamp(ack_packet)):
+                p = sent_packets[cursor]
+                start = relative(p["seq"], base)
+                sent_so_far.append((start, start + p["length"]))
+                cursor += 1
+            acked = relative(ack_packet["ack"], base)
+            open_ranges = [(max(start, acked), end) for start, end in sent_so_far
+                           if end > acked]
+            series.append({"time_ms": ack_packet.get("time_ms"), "direction": label,
                            "outstanding": unique_payload(open_ranges),
-                           "cumulative_ack": acked})
+                           "cumulative_ack": acked,
+                           "sent_records_counted": cursor})
+    series.sort(key=lambda pt: (pt["time_ms"] if pt["time_ms"] is not None else 0))
     return {"series": series,
             "limitation": ("Reported as observed outstanding data, not cwnd. Sequence "
                            "wraparound beyond one 2^32 window, loss, and SACK-based "

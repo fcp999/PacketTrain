@@ -1098,3 +1098,58 @@ def test_flow_playback_compresses_a_long_gap(tmp_path, monkeypatch):
     # Every packet is still present exactly once.
     frames = [s["frame"] for s in playback["segments"] if s["kind"] == "packet"]
     assert frames == [1, 2]
+
+
+def test_outstanding_is_relative_to_the_initial_sequence_number():
+    """Absolute 32-bit sequence numbers must not be compared against zero.
+
+    Real captures open with an ISN near 2^31 or above. Comparing absolute
+    values meant `end <= acked` was false for nearly every range, so payload
+    that had long since been acknowledged still counted as outstanding.
+    """
+    acc = packettrain.accounting_tcp
+    base = 2038937247            # a real client ISN from Ollama_001
+    lines = [
+        row(1, 0.000, 1, base, 0, {"tcp.flags.syn": "1"}),
+        row(2, 0.010, 1, base + 1, 1448, {"tcp.flags.ack": "1"}),
+        row(3, 0.020, 1, base + 1449, 1448, {"tcp.flags.ack": "1"}),
+    ]
+    packets = packettrain.parse_rows(lines)
+    packets.append(dict(packets[0]))
+    for p in packets:
+        p["time_ms"] = round(p["ts"] * 1000, 3)
+        p["direction"] = "out" if p["src"] == "192.0.2.1" else "in"
+    # A server ACK covering both segments.
+    ack = dict(packets[2])
+    ack.update(frame=4, time_ms=30.0, direction="in", src="198.51.100.2",
+               dst="192.0.2.1", sport=443, dport=50000, length=0,
+               ack=base + 1 + 1448 + 1448)
+    packets.append(ack)
+
+    series = acc.outstanding_bytes(packets)["series"]
+    out_points = [pt for pt in series if pt["direction"] == "out"]
+    assert out_points, "expected an outstanding series"
+    # Everything was acknowledged, so the final reading must be zero. Before the
+    # fix this stayed at 2896 because the absolute ACK never satisfied `end <= acked`.
+    assert out_points[-1]["outstanding"] == 0
+
+
+def test_no_payload_sent_means_nothing_outstanding():
+    """A handshake with no payload must not report outstanding bytes."""
+    acc = packettrain.accounting_tcp
+    base = 3228030431
+    packets = packettrain.parse_rows([
+        row(1, 0.0, 1, base, 0, {"tcp.flags.syn": "1"}),
+    ])
+    packets[0].update(direction="out", time_ms=0.0)
+    assert acc.outstanding_bytes(packets)["series"] == []
+
+
+def test_initial_sequence_falls_back_without_a_syn():
+    """A mid-stream capture still gets a consistent relative view."""
+    acc = packettrain.accounting_tcp
+    packets = packettrain.parse_rows(
+        [row(1, 0.0, 1, 500000, 1448, {"tcp.flags.ack": "1"})])
+    packets[0].update(direction="out", time_ms=0.0)
+    assert acc.initial_sequence(packets, True) == 500000
+    assert acc.relative(500100, 500000) == 100
