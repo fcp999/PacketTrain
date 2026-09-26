@@ -69,14 +69,15 @@ let playback=null,skipping=false,autoSpeedApplied=1,userSetSpeed=false;
 // 1/100x..100x by the wider range below. Values are symmetric about 1x.
 function speedValue(){return Math.pow(10,Number($('speed').value))}
 // Pick a playback speed so one round trip plays in about a second of wall clock:
-// speed = 1s / RTT, so 200 ms -> 5x and 1 ms -> 1000x, capped at 10000x.
-const AUTO_TRIP_SECONDS=1.0;
-function autoSpeedForRtt(rttMs){if(!rttMs||rttMs<=0)return 1;const speed=AUTO_TRIP_SECONDS/(rttMs/1000);return Math.min(10000,Math.max(0.0001,speed))}
+// One round trip takes about 100 s of wall clock to watch:
+// speed = 1 / (100 * RTT), so 35 ms -> 1/3.5x and 1 ms -> 10x.
+const AUTO_TRIP_SECONDS=100.0;
+function autoSpeedForRtt(rttMs){if(!rttMs||rttMs<=0)return 1;const speed=1/(AUTO_TRIP_SECONDS*(rttMs/1000));return Math.min(10000,Math.max(0.0001,speed))}
 function speedToSlider(v){return Math.min(4,Math.max(-4,Math.log10(v)))}
 function applyAutoSpeed(rttMs){const v=autoSpeedForRtt(rttMs);$('speed').value=speedToSlider(v).toFixed(2);updateSpeedLabel();return v}
 function formatSpeed(v){if(v>=1)return (Number.isInteger(v)?v:v.toFixed(2))+'×';const inv=1/v;return `1/${Number.isInteger(inv)?inv:inv.toFixed(2)}×`}
 function updateSpeedLabel(){const v=speedValue();$('speedLabel').textContent=formatSpeed(v)}
-function autoSpeedNote(rttMs){const v=autoSpeedForRtt(rttMs);return `Auto ${formatSpeed(v)} for a ${rttMs.toFixed(rttMs<10?2:0)} ms RTT (about 1 s to cross)`}
+function autoSpeedNote(rttMs){const v=autoSpeedForRtt(rttMs);return `Auto ${formatSpeed(v)} for a ${rttMs.toFixed(rttMs<10?2:0)} ms RTT (one round trip takes about 100 s to watch)`}
 function showSkipLabel(gap){let el=$('skipLabel');if(!el){el=document.createElement('div');el.id='skipLabel';el.className='skip-label';$('track').appendChild(el)}el.textContent=gap.label;el.style.display=''}
 function hideSkipLabel(){let el=$('skipLabel');if(el)el.style.display='none'}
 async function loadPlayback(){playback=null;if(!flow||!flow.summary)return;const mode=$('pmode').value;const speed=speedValue();try{const d=await api(BASE+'/api/flow?file='+encodeURIComponent($('file').value)+'&stream='+flow.summary.id+'&mode='+encodeURIComponent(mode)+'&speed='+speed);playback=d.playback||null}catch(e){playback=null}
