@@ -64,6 +64,10 @@ def parse_rows(lines):
             "dup_ack": bool(p["tcp.analysis.duplicate_ack"]),
             "sack": bool(p["tcp.options.sack_le"]),
             "window": num(p["tcp.window_size"]),
+            # Distinguishes "advertised 0" from "field absent": a sliced capture
+            # or a non-TCP row leaves the field empty and must not be read as a
+            # receiver zero-window stall.
+            "window_present": p["tcp.window_size"] != "",
             "ack_rtt_ms": (decimal(p["tcp.analysis.ack_rtt"]) or 0) * 1000,
             "mss": num(p["tcp.options.mss_val"]),
             "tls_handshake": p["tls.handshake.type"],
