@@ -26,6 +26,34 @@ def test_parse_flags_and_timing():
     assert detail["packets"][1]["time_ms"] == pytest.approx(200)
 
 
+def test_https_handshake_timing_and_encrypted_shape():
+    lines = [
+        row(1, 10.0, 1, 1, 0, {"tcp.flags.syn": "1"}),
+        row(2, 10.10, 1, 2, 300, {"tls.handshake.type": "1", "tls.record.content_type": "22",
+                                   "tls.handshake.extensions_server_name": "example.test",
+                                   "tls.handshake.extensions_alpn_str": "h2"}),
+        row(3, 10.35, 1, 3, 120, {"tls.handshake.type": "2", "tls.record.content_type": "22"}),
+        row(4, 10.36, 1, 4, 900, {"tls.record.content_type": "23"}),
+        row(5, 10.50, 1, 5, 80, {"tls.record.content_type": "23"}),
+        row(6, 10.75, 1, 6, 600, {"tls.record.content_type": "23"}),
+    ]
+    packets = packettrain.parse_rows(lines)
+    for p in (packets[2], packets[3], packets[5]):
+        p.update(src="198.51.100.2", dst="192.0.2.1", sport=443, dport=50000)
+    tls = packettrain.analyze_https(packets, ("192.0.2.1", 50000))
+    assert tls["client_hello_to_server_hello_ms"] == pytest.approx(250)
+    assert tls["server_hello_to_first_server_cipher_ms"] == pytest.approx(10)
+    assert tls["sni"] == "example.test" and tls["alpn_offered"] == "h2"
+    assert tls["behavior"]["metrics"]["server_bytes"] == 600
+    assert tls["behavior"]["metrics"]["client_bytes"] == 0
+    assert packettrain.stream_detail(packets, 1)["https"]["detected"]
+
+
+def test_https_needs_visible_hello():
+    packets = packettrain.parse_rows([row(1, 0, 1, 1, 120)])
+    assert packettrain.analyze_https(packets, ("192.0.2.1", 50000)) is None
+
+
 def test_files_stay_inside_mount(tmp_path, monkeypatch):
     monkeypatch.setattr(packettrain, "PCAP_DIR", tmp_path)
     (tmp_path / "good.pcap").write_bytes(b"capture")
