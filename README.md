@@ -71,9 +71,10 @@ required.
   block. A packet with SACK takes precedence over its duplicate ACK label.
 - **X** is shown only for a sequence gap with duplicate ACK or SACK evidence.
   It means an inferred missing range, not a measured physical loss location.
-- The link rate is a user-supplied model parameter. The app calculates
-  serialization time for a typical captured data frame and bandwidth-delay
-  product; it does not infer link speed from the PCAP. If the modeled first
+- The link rate is a user-supplied model parameter, defaulting to 1 Gb/s. The
+  app calculates serialization time for a typical captured data frame and
+  bandwidth-delay product; it does not infer link speed from the PCAP. Set it to
+  the actual link under test when the model matters. If the modeled first
   flight would take much longer to serialize than the observed frame timestamp
   span, the interface flags that mismatch. Capture timestamps can precede
   physical transmission.
