@@ -357,3 +357,17 @@ def test_cipher_interval_has_both_names_and_agrees():
     tls = packettrain.analyze_https(packets, ("192.0.2.1", 50000))
     assert tls["server_hello_to_first_record_ms"] == tls["server_hello_to_first_server_cipher_ms"]
     assert tls["server_hello_to_first_record_ms"] == pytest.approx(20, abs=1)
+
+
+def test_handshake_decoded_is_reported_on_both_paths():
+    """handshake_decoded must be explicit, not only present when false."""
+    lines = [
+        row(1, 0.00, 1, 1, 300, {"tls.handshake.type": "1", "tls.record.content_type": "22"}),
+        row(2, 0.25, 1, 2, 90, {"tls.handshake.type": "2", "tls.record.content_type": "22"}),
+    ]
+    packets = packettrain.parse_rows(lines)
+    for p in packets[1:]:
+        p.update(src="198.51.100.2", dst="192.0.2.1", sport=443, dport=50000)
+    tls = packettrain.analyze_https(packets, ("192.0.2.1", 50000))
+    assert tls["detected"] is True
+    assert tls["handshake_decoded"] is True

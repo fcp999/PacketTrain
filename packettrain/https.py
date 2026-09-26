@@ -76,7 +76,7 @@ def analyze_https(packets, client):
         behavior = classify_stream(traffic, client)
 
     result = {
-        "detected": True, "sni": sni, "alpn_offered": alpn,
+        "detected": True, "handshake_decoded": True, "sni": sni, "alpn_offered": alpn,
         "client_hello_frame": hello["frame"] if hello else None,
         "server_hello_frame": server_hello["frame"] if server_hello else None,
         "client_hello_to_server_hello_ms": elapsed(server_hello, hello),
