@@ -634,3 +634,131 @@ def test_static_assets_are_served_and_scoped():
     # Path traversal must not escape the static directory.
     assert client.get("/static/../app.py").status_code in (400, 404)
     assert client.get("/static/..%2fapp.py").status_code in (400, 404)
+
+
+def _timed(lines):
+    """Parse rows and attach time_ms/direction, as stream_detail does."""
+    packets = packettrain.parse_rows(lines)
+    first = packets[0]["ts"]
+    for p in packets:
+        p["time_ms"] = round((p["ts"] - first) * 1000, 3)
+        p["direction"] = "out" if p["src"] == "192.0.2.1" else "in"
+    return packets
+
+
+def test_phases_label_bulk_flight_and_teardown():
+    """A handshake followed immediately by data forms one phase, then teardown.
+
+    A SYN and the data that follows it within the idle threshold are a single
+    activity run, so the phase is labelled by its payload shape rather than
+    being split into a separate setup phase.
+    """
+    lines = [row(1, 0.0, 1, 100, 0, {"tcp.flags.syn": "1"})]
+    for i in range(60):
+        lines.append(row(2 + i, 0.1 + i * 0.01, 1, 200 + i * 1400, 1400,
+                         {"tcp.flags.ack": "1"}))
+    lines.append(row(70, 30.0, 1, 90000, 0, {"tcp.flags.fin": "1",
+                                             "tcp.flags.ack": "1"}))
+    packets = _timed(lines)
+    result = packettrain.phases.stream_phases(packets)
+    by_label = {p["label"]: p for p in result["phases"]}
+    assert "Bulk transfer" in by_label
+    # The SYN is inside the bulk run, not lost.
+    assert 1 in by_label["Bulk transfer"]["frames"]
+    assert "Teardown" in by_label
+    for ph in result["phases"]:
+        assert "start_ms" in ph and "end_ms" in ph and "duration_ms" in ph
+        assert ph["evidence"]
+        assert isinstance(ph["frames"], list)
+        assert "alternatives" in ph
+
+
+def test_phases_report_a_payload_pause_between_activity():
+    """The quiet interval between two activity runs is an explicit phase."""
+    lines = [row(1, 0.0, 1, 100, 200, {"tcp.flags.ack": "1"})]
+    lines.append(row(2, 10.0, 1, 300, 200, {"tcp.flags.ack": "1"}))
+    packets = _timed(lines)
+    result = packettrain.phases.stream_phases(packets)
+    labels = [p["label"] for p in result["phases"]]
+    assert any(lbl in ("Payload pause", "Idle") for lbl in labels)
+    pause = next(p for p in result["phases"] if p["label"] in ("Payload pause", "Idle"))
+    assert pause["packets"] == 0
+    assert pause["duration_ms"] >= 2000
+    assert pause["alternatives"], "a pause must admit a competing explanation"
+
+
+def test_phase_thresholds_are_versioned_and_disclosed():
+    packets = _timed([row(1, 0.0, 1, 100, 200, {"tcp.flags.ack": "1"})])
+    result = packettrain.phases.stream_phases(packets)
+    assert result["thresholds"]["version"]
+    assert result["thresholds"]["idle_gap_s"] == packettrain.phases.THRESHOLDS["idle_gap_s"]
+    assert "not unique" in result["limitation"]
+
+
+def test_phases_handle_empty_stream():
+    result = packettrain.phases.stream_phases([])
+    assert result["phases"] == []
+
+
+def test_transport_symptoms_keep_observation_apart_from_cause():
+    """Each symptom states what it does not prove."""
+    lines = [
+        row(1, 0.0, 1, 100, 1400, {"tcp.flags.ack": "1",
+                                    "tcp.analysis.retransmission": "1"}),
+        row(2, 0.1, 1, 200, 0, {"tcp.flags.ack": "1", "tcp.window_size": "0"}),
+        row(3, 0.2, 1, 300, 100, {"tcp.flags.ack": "1", "tcp.options.sack_le": "100"}),
+        row(4, 0.3, 1, 400, 0, {"tcp.flags.reset": "1"}),
+    ]
+    packets = _timed(lines)
+    result = packettrain.phases.transport_symptoms(packets)
+    names = {s["symptom"] for s in result["symptoms"]}
+    assert "Recovery observed" in names
+    assert "Receiver flow-control stall" in names
+    assert "SACK signalling present" in names
+    assert "Connection failure" in names
+    for s in result["symptoms"]:
+        assert s["does_not_prove"], f"{s['symptom']} must say what it does not prove"
+    assert "cwnd" in result["limitation"]
+
+
+def test_transport_symptoms_absent_on_a_clean_stream():
+    """A healthy segment advertises a window and shows no symptoms."""
+    packets = _timed([row(1, 0.0, 1, 100, 500,
+                          {"tcp.flags.ack": "1", "tcp.window_size": "64240"})])
+    result = packettrain.phases.transport_symptoms(packets)
+    assert result["symptoms"] == []
+
+
+def test_absent_window_is_not_a_zero_window_stall():
+    """A missing window field is unknown, not a receiver stall.
+
+    Sliced captures and non-TCP rows leave tcp.window_size empty; reading that
+    as an advertised zero would invent a flow-control stall.
+    """
+    packets = _timed([row(1, 0.0, 1, 100, 500, {"tcp.flags.ack": "1"})])
+    assert packets[0]["window"] == 0
+    assert packets[0]["window_present"] is False
+    result = packettrain.phases.transport_symptoms(packets)
+    assert result["symptoms"] == []
+
+
+def test_advertised_zero_window_is_reported():
+    """A genuine zero-window advertisement is a stall."""
+    packets = _timed([row(1, 0.0, 1, 100, 500,
+                          {"tcp.flags.ack": "1", "tcp.window_size": "0"})])
+    assert packets[0]["window_present"] is True
+    result = packettrain.phases.transport_symptoms(packets)
+    assert any(s["symptom"] == "Receiver flow-control stall" for s in result["symptoms"])
+
+
+def test_flow_carries_phases_and_symptoms():
+    lines = [
+        row(1, 0.0, 1, 100, 0, {"tcp.flags.syn": "1"}),
+        row(2, 0.1, 1, 200, 1400, {"tcp.flags.ack": "1",
+                                    "tcp.analysis.retransmission": "1"}),
+    ]
+    packets = packettrain.parse_rows(lines)
+    detail = packettrain.stream_detail(packets, 1)
+    assert detail["phases"]["phases"]
+    assert detail["phases"]["thresholds"]["version"]
+    assert any(s["symptom"] == "Recovery observed" for s in detail["symptoms"]["symptoms"])

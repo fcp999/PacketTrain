@@ -8,6 +8,7 @@ from .behavior import classify_stream
 from .https import analyze_https
 from .position import position_evidence
 from .accounting_tcp import tcp_accounting
+from .phases import stream_phases, transport_symptoms
 
 
 def summarize(packets):
@@ -89,9 +90,11 @@ def stream_detail(packets, stream):
              "sack_packets": sum(p["sack"] for p in group),
              "psh_packets": sum(p["psh"] for p in group)}
     tcp_detail = tcp_accounting(accounting_input)
+    phases = stream_phases(accounting_input)
+    symptoms = transport_symptoms(accounting_input)
     return {"summary": summary, "rtt_ms": round(rtt, 2) if rtt is not None else None,
             "rtt_source": source, "capture_side": side, "position": position,
-            "accounting": tcp_detail,
+            "accounting": tcp_detail, "phases": phases, "symptoms": symptoms,
             "handshake_legs_ms": [round(leg1, 3), round(leg2, 3)] if leg1 is not None and leg2 is not None else None,
             "packets": group, "facts": facts, "pattern": pattern,
             "https": https, "slicing": slicing_report(group),
