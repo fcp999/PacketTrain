@@ -93,6 +93,28 @@ def flow():
     return jsonify(detail)
 
 
+@app.get("/api/match")
+def match():
+    """Cross-connection consistency for one capture.
+
+    Fingerprints every stream, then reports which families recur. A family seen
+    once is weak evidence; the same family across many connections is stronger.
+    """
+    packets = read_capture(capture_path(request.args.get("file", "")))
+    per_stream = []
+    for summary in summarize(packets):
+        detail = stream_detail(packets, summary["id"])
+        row = {"id": summary["id"], "client": summary["client"],
+               "server": summary["server"], "port": summary["server_port"]}
+        for side in ("client", "server"):
+            fp = detail.get("fingerprint") or {}
+            row[side] = fp.get(side) or {}
+        per_stream.append(row)
+    return jsonify({"streams": len(per_stream),
+                    "entries": per_stream,
+                    **fingerprint.cross_connection_consistency(per_stream)})
+
+
 @app.get("/api/slicing")
 def slicing():
     """Report packet slicing for one capture without reading full packet detail."""

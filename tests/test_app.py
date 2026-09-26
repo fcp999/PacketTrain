@@ -1159,3 +1159,19 @@ def test_initial_sequence_falls_back_without_a_syn():
     packets[0].update(direction="out", time_ms=0.0)
     assert acc.initial_sequence(packets, True) == 500000
     assert acc.relative(500100, 500000) == 100
+
+
+def test_match_reports_recurring_families_across_streams(tmp_path, monkeypatch):
+    """Cross-capture matching names families that recur across connections."""
+    client = _real_file_client(tmp_path, monkeypatch)
+    r = client.get("/api/match?file=sample.pcap")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["streams"] >= 1
+    assert isinstance(body["counts"], list)
+    # Every count names a side, a family and how many connections showed it.
+    for c in body["counts"]:
+        assert c["side"] in ("client", "server")
+        assert c["family"]
+        assert c["connections"] >= 1
+    assert "note" in body
