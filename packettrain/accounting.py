@@ -7,6 +7,7 @@ from .decode import slicing_report
 from .behavior import classify_stream
 from .https import analyze_https
 from .position import position_evidence
+from .accounting_tcp import tcp_accounting
 
 
 def summarize(packets):
@@ -34,10 +35,15 @@ def stream_detail(packets, stream):
     first_ts = group[0]["ts"]
     pattern = classify_stream(group, (summary["client"], summary["client_port"]))
     https = analyze_https(group, (summary["client"], summary["client_port"]))
+    # Accounting needs the original "ts", which the response drops below.
+    accounting_input = [dict(p) for p in group]
     for p in group:
         p["time_ms"] = round((p.pop("ts") - first_ts) * 1000, 3)
         p["direction"] = "out" if (p["src"], p["sport"]) == (
             summary["client"], summary["client_port"]) else "in"
+    for p, original in zip(accounting_input, group):
+        p["time_ms"] = original["time_ms"]
+        p["direction"] = original["direction"]
     syn = next((p for p in group if p["syn"] and not p["ack_flag"] and p["direction"] == "out"), None)
     synack = next((p for p in group if p["syn"] and p["ack_flag"] and p["direction"] == "in"
                    and (syn is None or p["time_ms"] > syn["time_ms"])), None)
@@ -82,8 +88,10 @@ def stream_detail(packets, stream):
              "retransmissions": sum(p["retrans"] for p in group),
              "sack_packets": sum(p["sack"] for p in group),
              "psh_packets": sum(p["psh"] for p in group)}
+    tcp_detail = tcp_accounting(accounting_input)
     return {"summary": summary, "rtt_ms": round(rtt, 2) if rtt is not None else None,
             "rtt_source": source, "capture_side": side, "position": position,
+            "accounting": tcp_detail,
             "handshake_legs_ms": [round(leg1, 3), round(leg2, 3)] if leg1 is not None and leg2 is not None else None,
             "packets": group, "facts": facts, "pattern": pattern,
             "https": https, "slicing": slicing_report(group),

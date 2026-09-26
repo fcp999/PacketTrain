@@ -16,7 +16,9 @@ from packettrain.config import EXTENSIONS, FIELDS, MAX_BYTES, capture_dir, captu
 from packettrain.decode import (decimal, flag_bits, flag_set, num, parse_rows,
                                read_capture, slicing_report)
 from packettrain.https import analyze_https
+from packettrain.accounting_tcp import tcp_accounting
 from packettrain.position import infer_capture_side, position_evidence
+from packettrain import accounting_tcp
 
 # Re-exported so callers that imported these from the app module keep working.
 # The package modules are the real owners; this is a compatibility surface.

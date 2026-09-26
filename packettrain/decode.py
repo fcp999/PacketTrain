@@ -72,6 +72,9 @@ def parse_rows(lines):
             "tls_alpn": p["tls.handshake.extensions_alpn_str"],
             "tls_version": p["tls.handshake.version"],
             "ttl": num(p["ip.ttl"]) or num(p["ipv6.hlim"]),
+            # Window scale shift advertised in this packet's own options, if any.
+            # Only SYNs carry it; the value in a SYN's window field is unscaled.
+            "wscale": num(p["tcp.options.wscale.shift"], -1),
         })
     return packets
 
