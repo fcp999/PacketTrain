@@ -1083,7 +1083,13 @@ def test_flow_playback_requires_a_known_mode(tmp_path, monkeypatch):
 def test_flow_playback_rejects_bad_speed(tmp_path, monkeypatch):
     client = _real_file_client(tmp_path, monkeypatch)
     assert client.get("/api/flow?file=sample.pcap&stream=1&speed=abc").status_code == 400
+    # Above the shared ceiling is still rejected.
     assert client.get("/api/flow?file=sample.pcap&stream=1&speed=99999").status_code == 400
+    # But a fast auto speed must be accepted: a 0.4 ms RTT yields ~1122x, and
+    # rejecting it silently broke the entire playback path.
+    assert client.get("/api/flow?file=sample.pcap&stream=1&speed=1122").status_code == 200
+    assert client.get("/api/flow?file=sample.pcap&stream=1&speed=10000").status_code == 200
+    assert client.get("/api/flow?file=sample.pcap&stream=1&speed=0.0001").status_code == 200
 
 
 def test_flow_playback_compresses_a_long_gap(tmp_path, monkeypatch):

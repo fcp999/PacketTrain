@@ -79,7 +79,9 @@ def flow():
             speed = float(speed_arg)
         except ValueError:
             abort(400, "Invalid speed")
-        if not 0.01 <= speed <= 1000:
+        # Bounds come from the playback module so the slider range and this
+        # validation cannot drift apart.
+        if not idle.SPEED_MIN <= speed <= idle.SPEED_MAX:
             abort(400, "Speed out of range")
     if mode:
         if mode not in idle.MODES:

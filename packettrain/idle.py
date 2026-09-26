@@ -11,6 +11,11 @@ playback pacing, and every compressed interval keeps its duration, boundaries
 and an expansion option.
 """
 
+# Playback speed bounds, shared with the API's request validation. The UI slider
+# spans the same range; deriving both from here keeps them from drifting.
+SPEED_MIN = 0.0001
+SPEED_MAX = 10000.0
+
 MODES = {
     "version": "2026-09-26.1",
     "faithful": "Preserve captured timing at the selected speed.",
