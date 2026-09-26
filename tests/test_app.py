@@ -882,3 +882,159 @@ def test_flow_carries_fingerprint():
     detail = packettrain.stream_detail(packets, 1)
     assert detail["fingerprint"]["client"]["observed"] is True
     assert detail["fingerprint"]["signature_version"]
+
+
+def _stream_at(packets):
+    """Attach time_ms/direction, as stream_detail does."""
+    first = packets[0]["ts"]
+    for p in packets:
+        p["time_ms"] = round((p["ts"] - first) * 1000, 3)
+        p["direction"] = "out" if p["src"] == "192.0.2.1" else "in"
+    return packets
+
+
+def test_idle_gap_is_compressed_in_smart_mode():
+    """A long quiet gap becomes a labelled compressed segment."""
+    idle = packettrain.idle
+    lines = [
+        row(1, 0.0, 1, 100, 500, {"tcp.flags.ack": "1", "tcp.window_size": "64240"}),
+        row(2, 30.0, 1, 600, 500, {"tcp.flags.ack": "1", "tcp.window_size": "64240"}),
+    ]
+    packets = _stream_at(packettrain.parse_rows(lines))
+    result = idle.analyze_gaps(packets, mode="smart")
+    gap = result["gaps"][0]
+    assert gap["compressible"] is True
+    assert gap["reason"] == "idle"
+    assert gap["label"] == "Idle interval compressed \u00b7 30.0 s"
+    assert gap["expandable"] is True
+    assert result["compressed_seconds"] == 30.0
+
+
+def test_faithful_mode_compresses_nothing():
+    idle = packettrain.idle
+    lines = [
+        row(1, 0.0, 1, 100, 500, {"tcp.flags.ack": "1", "tcp.window_size": "64240"}),
+        row(2, 30.0, 1, 600, 500, {"tcp.flags.ack": "1", "tcp.window_size": "64240"}),
+    ]
+    packets = _stream_at(packettrain.parse_rows(lines))
+    result = idle.analyze_gaps(packets, mode="faithful")
+    assert result["compressed_count"] == 0
+    assert all(g["label"] is None for g in result["gaps"])
+
+
+def test_short_gap_is_not_compressed():
+    """A gap below the playback trigger is left alone."""
+    idle = packettrain.idle
+    lines = [
+        row(1, 0.0, 1, 100, 500, {"tcp.flags.ack": "1", "tcp.window_size": "64240"}),
+        row(2, 0.5, 1, 600, 500, {"tcp.flags.ack": "1", "tcp.window_size": "64240"}),
+    ]
+    packets = _stream_at(packettrain.parse_rows(lines))
+    result = idle.analyze_gaps(packets, mode="smart")
+    assert result["compressed_count"] == 0
+
+
+def test_retransmission_wait_is_preserved_not_compressed():
+    """Smart skip must not compress a retransmission wait."""
+    idle = packettrain.idle
+    lines = [
+        row(1, 0.0, 1, 100, 500, {"tcp.flags.ack": "1", "tcp.window_size": "64240",
+                                   "tcp.analysis.retransmission": "1"}),
+        row(2, 30.0, 1, 600, 500, {"tcp.flags.ack": "1", "tcp.window_size": "64240"}),
+    ]
+    packets = _stream_at(packettrain.parse_rows(lines))
+    result = idle.analyze_gaps(packets, mode="smart")
+    gap = result["gaps"][0]
+    assert gap["compressible"] is False
+    assert gap["reason"] == "retransmission"
+    assert gap["label"] is None
+    assert "retransmission" in gap["preserved_because"]
+
+
+def test_zero_window_wait_is_preserved():
+    idle = packettrain.idle
+    lines = [
+        row(1, 0.0, 1, 100, 0, {"tcp.flags.ack": "1", "tcp.window_size": "0"}),
+        row(2, 30.0, 1, 100, 500, {"tcp.flags.ack": "1", "tcp.window_size": "64240"}),
+    ]
+    packets = _stream_at(packettrain.parse_rows(lines))
+    result = idle.analyze_gaps(packets, mode="smart")
+    assert result["gaps"][0]["compressible"] is False
+    assert result["gaps"][0]["reason"] == "zero_window"
+
+
+def test_unresolved_outstanding_payload_is_preserved():
+    """Payload still unacknowledged across the gap is not harmless idle."""
+    idle = packettrain.idle
+    lines = [
+        row(1, 0.0, 1, 100, 1000, {"tcp.flags.ack": "1", "tcp.window_size": "64240"}),
+        row(2, 30.0, 1, 2000, 0, {"tcp.flags.ack": "1", "tcp.window_size": "64240"}),
+    ]
+    packets = packettrain.parse_rows(lines)
+    # The server acks nothing the client sent, so the 1000 bytes stay
+    # outstanding across the gap. Override the address before deriving
+    # direction, or the ACK is attributed to the client.
+    packets[1].update(src="198.51.100.2", dst="192.0.2.1", sport=443, dport=50000)
+    packets[1]["ack"] = 100
+    _stream_at(packets)
+    result = idle.analyze_gaps(packets, mode="smart")
+    assert result["gaps"][0]["compressible"] is False
+    assert result["gaps"][0]["reason"] == "unresolved_outstanding"
+
+
+def test_fast_mode_labels_a_compressed_transport_wait():
+    """Fast review may compress a wait, but must name it."""
+    idle = packettrain.idle
+    lines = [
+        row(1, 0.0, 1, 100, 500, {"tcp.flags.ack": "1", "tcp.window_size": "64240",
+                                   "tcp.analysis.retransmission": "1"}),
+        row(2, 30.0, 1, 600, 500, {"tcp.flags.ack": "1", "tcp.window_size": "64240"}),
+    ]
+    packets = _stream_at(packettrain.parse_rows(lines))
+    result = idle.analyze_gaps(packets, mode="fast")
+    label = result["gaps"][0]["label"]
+    assert label.startswith("Transport wait compressed")
+    assert "retransmission" in label
+
+
+def test_timeline_keeps_every_packet_once():
+    """Compression controls pacing only; no packet is dropped."""
+    idle = packettrain.idle
+    lines = [
+        row(1, 0.0, 1, 100, 500, {"tcp.flags.ack": "1", "tcp.window_size": "64240"}),
+        row(2, 30.0, 1, 600, 500, {"tcp.flags.ack": "1", "tcp.window_size": "64240"}),
+        row(3, 30.1, 1, 1100, 500, {"tcp.flags.ack": "1", "tcp.window_size": "64240"}),
+    ]
+    packets = _stream_at(packettrain.parse_rows(lines))
+    result = idle.timeline(packets, mode="smart")
+    kinds = [s["kind"] for s in result["segments"]]
+    assert kinds.count("packet") == 3
+    assert "compressed" in kinds
+    frames = [s["frame"] for s in result["segments"] if s["kind"] == "packet"]
+    assert frames == [1, 2, 3]
+
+
+def test_idle_uses_speed_for_the_trigger():
+    """A gap that is short at 1x becomes compressible at a slow speed."""
+    idle = packettrain.idle
+    lines = [
+        row(1, 0.0, 1, 100, 500, {"tcp.flags.ack": "1", "tcp.window_size": "64240"}),
+        row(2, 3.0, 1, 600, 500, {"tcp.flags.ack": "1", "tcp.window_size": "64240"}),
+    ]
+    packets = _stream_at(packettrain.parse_rows(lines))
+    # 3 s captured at 20x playback = 0.15 s, below the 2 s trigger.
+    assert idle.analyze_gaps(packets, mode="smart", speed=20)["compressed_count"] == 0
+    # At 0.5x it is 6 s of playback, above the trigger.
+    assert idle.analyze_gaps(packets, mode="smart", speed=0.5)["compressed_count"] == 1
+
+
+def test_idle_never_rewrites_timestamps():
+    idle = packettrain.idle
+    lines = [
+        row(1, 0.0, 1, 100, 500, {"tcp.flags.ack": "1", "tcp.window_size": "64240"}),
+        row(2, 30.0, 1, 600, 500, {"tcp.flags.ack": "1", "tcp.window_size": "64240"}),
+    ]
+    packets = _stream_at(packettrain.parse_rows(lines))
+    before = [p["time_ms"] for p in packets]
+    idle.timeline(packets, mode="smart")
+    assert [p["time_ms"] for p in packets] == before
