@@ -19,6 +19,8 @@ from flask import abort
 from .config import capture_path
 
 MAX_PAYLOAD_BYTES = 1 << 20  # 1 MiB: enough for a body, bounded for the response
+CONVERSATION_PREVIEW_BYTES = 1000
+MAX_CONVERSATION_PAGE_BYTES = 1 << 20  # Bound each interactive response
 
 
 def _read_bytes(path, frame):
@@ -49,6 +51,93 @@ def _read_bytes(path, frame):
     except (binascii.Error, ValueError):
         return b""
     return data[:MAX_PAYLOAD_BYTES]
+
+
+_FOLLOW_NODE = re.compile(r"^Node ([01]):\s*(.+)$")
+_FOLLOW_HEX = re.compile(r"^[0-9a-fA-F]+$")
+
+
+def parse_follow_raw(text, limit=CONVERSATION_PREVIEW_BYTES, offset=0):
+    """Parse ``tshark -z follow,tcp,raw`` output without duplicating retransmits.
+
+    TShark's follow engine performs TCP sequence reassembly first. Data for node
+    1 is tab-indented; node 0 is not. The parser counts the complete stream but
+    retains at most ``limit`` bytes, so the JSON response stays bounded.
+    """
+    limit = max(1, min(int(limit), MAX_CONVERSATION_PAGE_BYTES))
+    offset = max(0, int(offset))
+    nodes = {}
+    chunks = []
+    total = kept = 0
+    for line in text.splitlines():
+        m = _FOLLOW_NODE.match(line.strip())
+        if m:
+            nodes[int(m.group(1))] = m.group(2)
+            continue
+        raw_hex = line.strip()
+        if not raw_hex or len(raw_hex) % 2 or not _FOLLOW_HEX.fullmatch(raw_hex):
+            continue
+        node = 1 if line.startswith("\t") else 0
+        size = len(raw_hex) // 2
+        start = total
+        total += size
+        skip = max(0, offset - start)
+        if skip >= size:
+            continue
+        take = min(size - skip, limit - kept)
+        if take <= 0:
+            continue
+        data = binascii.unhexlify(raw_hex[skip * 2:(skip + take) * 2])
+        kept += len(data)
+        if chunks and chunks[-1]["node"] == node:
+            chunks[-1]["data"].extend(data)
+        else:
+            chunks.append({"node": node, "data": bytearray(data)})
+    return nodes, chunks, total
+
+
+def decode_conversation(path, stream, limit=CONVERSATION_PREVIEW_BYTES, offset=0):
+    """Return a bounded, TCP-reassembled payload transcript for one stream."""
+    limit = max(1, min(int(limit), MAX_CONVERSATION_PAGE_BYTES))
+    offset = max(0, int(offset))
+    command = [
+        "tshark", "-n", "-r", str(path), "-q",
+        "-z", f"follow,tcp,raw,{int(stream)}",
+    ]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=180,
+                                check=False, errors="replace")
+    except subprocess.TimeoutExpired:
+        abort(504, "TShark timed out reassembling the conversation")
+    except FileNotFoundError:
+        abort(500, "TShark is unavailable")
+    if result.returncode:
+        abort(422, "TShark could not follow this TCP stream: " + result.stderr[-500:])
+    nodes, raw_chunks, total = parse_follow_raw(result.stdout, limit, offset)
+    chunks = []
+    for entry in raw_chunks:
+        data = bytes(entry["data"])
+        chunks.append({
+            "node": entry["node"],
+            "length": len(data),
+            "ascii": ascii_view(data),
+            "hex": hex_dump(data),
+            "hex_raw": data.hex(),
+        })
+    returned = sum(c["length"] for c in chunks)
+    return {
+        "scope": "conversation",
+        "stream": int(stream),
+        "nodes": {str(k): v for k, v in nodes.items()},
+        "chunks": chunks,
+        "offset": offset,
+        "length": returned,
+        "loaded_through": offset + returned,
+        "total_length": total,
+        "truncated": offset + returned < total,
+        "limit": limit,
+        "max_page_length": MAX_CONVERSATION_PAGE_BYTES,
+    }
 
 
 def ascii_view(data):

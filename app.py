@@ -16,7 +16,8 @@ from packettrain.config import EXTENSIONS, FIELDS, MAX_BYTES, capture_dir, captu
 from packettrain.decode import (decimal, flag_bits, flag_set, num, parse_rows,
                                read_capture, slicing_report)
 from packettrain.https import analyze_https
-from packettrain.payload import decode_segment
+from packettrain.payload import (CONVERSATION_PREVIEW_BYTES, MAX_CONVERSATION_PAGE_BYTES,
+                                 decode_conversation, decode_segment)
 from packettrain.accounting_tcp import tcp_accounting
 from packettrain.position import infer_capture_side, position_evidence
 from packettrain import accounting_tcp, fingerprint, idle, phases
@@ -42,6 +43,21 @@ def index():
 def static_assets(name):
     """Serve vendored front-end assets. Only static/ is reachable."""
     return send_from_directory(ROOT / "packettrain" / "static", name)
+
+
+@app.get("/api/conversation-payload")
+def conversation_payload():
+    """TCP-reassembled payload transcript, previewed at 1,000 bytes by default."""
+    path = capture_path(request.args.get("file", ""))
+    raw = request.args.get("stream", "")
+    if not re.fullmatch(r"\d{1,8}", raw):
+        abort(400, "Invalid stream")
+    full = request.args.get("full", "") == "1"
+    limit = MAX_CONVERSATION_PAGE_BYTES if full else CONVERSATION_PREVIEW_BYTES
+    offset_raw = request.args.get("offset", "0")
+    if not re.fullmatch(r"\d{1,12}", offset_raw):
+        abort(400, "Invalid payload offset")
+    return jsonify(decode_conversation(path, int(raw), limit, int(offset_raw)))
 
 
 @app.get("/api/payload")

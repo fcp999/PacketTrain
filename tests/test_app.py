@@ -1256,3 +1256,65 @@ def test_burst_rate_reports_missing_timestamps_separately():
     assert burst["available"] is True
     assert burst["tsval_rate_mbps"] is None
     assert "no TCP timestamp option" in burst["tsval_note"]
+
+
+
+def test_follow_raw_reassembles_directions_and_bounds_preview():
+    from packettrain.payload import parse_follow_raw
+    text = """===================================================================
+Follow: tcp,raw
+Filter: tcp.stream eq 4
+Node 0: 192.0.2.1:50000
+Node 1: 198.51.100.2:80
+48656c6c6f20
+\t576f726c64
+21
+===================================================================
+"""
+    nodes, chunks, total = parse_follow_raw(text, limit=8)
+    assert nodes == {0: "192.0.2.1:50000", 1: "198.51.100.2:80"}
+    assert total == 12
+    assert [(c["node"], bytes(c["data"])) for c in chunks] == [
+        (0, b"Hello "), (1, b"Wo")
+    ]
+
+
+def test_conversation_payload_endpoint_defaults_to_preview(monkeypatch, tmp_path):
+    import packettrain.payload as payload_module
+    capture = tmp_path / "sample.pcap"
+    capture.write_bytes(b"pcap")
+    monkeypatch.setattr(ptconfig, "PCAP_DIR", tmp_path)
+
+    class Result:
+        returncode = 0
+        stderr = ""
+        stdout = """Follow: tcp,raw
+Node 0: 192.0.2.1:50000
+Node 1: 198.51.100.2:80
+""" + ("41" * 1005) + "\n"
+
+    monkeypatch.setattr(payload_module.subprocess, "run", lambda *a, **k: Result())
+    response = packettrain.app.test_client().get(
+        "/api/conversation-payload?file=sample.pcap&stream=4"
+    )
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["scope"] == "conversation"
+    assert data["length"] == 1000
+    assert data["total_length"] == 1005
+    assert data["truncated"] is True
+    assert data["chunks"][0]["ascii"] == "A" * 1000
+
+
+def test_follow_raw_offset_pages_continue_in_conversation_order():
+    from packettrain.payload import parse_follow_raw
+    text = """Follow: tcp,raw
+Node 0: 192.0.2.1:50000
+Node 1: 198.51.100.2:80
+48656c6c6f20
+\t576f726c64
+21
+"""
+    nodes, chunks, total = parse_follow_raw(text, limit=5, offset=6)
+    assert total == 12
+    assert [(c["node"], bytes(c["data"])) for c in chunks] == [(1, b"World")]
