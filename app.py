@@ -4,6 +4,7 @@ Thin Flask surface. Packet extraction lives in packettrain.decode, TCP summary
 and capture-side inference in packettrain.accounting, traffic-shape rules in
 packettrain.behavior, and TLS handling in packettrain.https.
 """
+import math
 import re
 import subprocess
 from pathlib import Path
@@ -14,10 +15,10 @@ from packettrain.accounting import stream_detail, summarize
 from packettrain.behavior import classify_stream
 from packettrain.config import EXTENSIONS, FIELDS, MAX_BYTES, capture_dir, capture_path  # noqa: F401
 from packettrain.decode import (decimal, flag_bits, flag_set, num, parse_rows,
-                               read_capture, slicing_report)
+                               read_capture, read_capture_with_follow, slicing_report)
 from packettrain.https import analyze_https
 from packettrain.payload import (CONVERSATION_PREVIEW_BYTES, MAX_CONVERSATION_PAGE_BYTES,
-                                 decode_conversation, decode_segment)
+                                 conversation_from_follow_output, decode_conversation, decode_segment)
 from packettrain.accounting_tcp import tcp_accounting
 from packettrain.position import infer_capture_side, position_evidence
 from packettrain import accounting_tcp, fingerprint, idle, phases
@@ -84,6 +85,40 @@ def files():
                      key=lambda p: p.name.lower())
     return jsonify({"files": [{"name": p.name, "bytes": p.stat().st_size} for p in entries],
                     "directory": str(directory)})
+
+
+@app.get("/api/bootstrap")
+def bootstrap():
+    """Stream index, selected flow, and payload preview from one TShark pass."""
+    path = capture_path(request.args.get("file", ""))
+    raw = request.args.get("stream", "0")
+    if not re.fullmatch(r"\d{1,8}", raw):
+        abort(400, "Invalid stream")
+    selected = int(raw)
+    packets, follow_output = read_capture_with_follow(path, selected)
+    summaries = summarize(packets)
+    if selected not in {item["id"] for item in summaries}:
+        abort(404, "TCP stream not found")
+    detail = stream_detail(packets, selected)
+    rtt_ms = detail.get("rtt_ms")
+    auto_speed = min(idle.SPEED_MAX, max(idle.SPEED_MIN, 500.0 / rtt_ms)) \
+        if rtt_ms and rtt_ms > 0 else 1.0
+    # Match the log slider's 0.05 step quantization so the browser can reuse
+    # this model without triggering another capture scan.
+    slider_step = 0.05
+    slider_value = round(math.log10(auto_speed) / slider_step) * slider_step
+    effective_speed = 10 ** slider_value
+    detail["playback"] = idle.timeline(
+        detail["packets"], mode="smart", speed=effective_speed
+    )
+    return jsonify({
+        "streams": summaries,
+        "flow": detail,
+        "payload": conversation_from_follow_output(
+            follow_output, selected, CONVERSATION_PREVIEW_BYTES, 0
+        ),
+        "tshark_passes": 1,
+    })
 
 
 @app.get("/api/streams")

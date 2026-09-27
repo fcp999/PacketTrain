@@ -1,4 +1,5 @@
 """Turn TShark field output into packet dictionaries."""
+import re
 import subprocess
 
 from flask import abort
@@ -123,11 +124,15 @@ def slicing_report(packets):
             "lost_bytes": lost, "sliced_fraction": round(fraction, 4), "advice": advice}
 
 
-def read_capture(path):
+def _field_command(path):
     command = ["tshark", "-n", "-r", str(path), "-Y", "tcp", "-T", "fields"]
     for field in FIELDS:
         command += ["-e", field]
     command += ["-E", "occurrence=f", "-E", "quote=n"]
+    return command
+
+
+def _run_tshark(command):
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=180,
                                 check=False, errors="replace")
@@ -137,9 +142,35 @@ def read_capture(path):
         abort(500, "TShark is unavailable")
     if result.returncode:
         abort(422, "TShark could not read this capture: " + result.stderr[-500:])
-    lines = result.stdout.splitlines()
+    return result.stdout
+
+
+def _parse_field_text(text):
+    lines = text.splitlines()
     if len(lines) > MAX_PACKETS:
         abort(413, "Capture exceeds MAX_PACKETS; split or filter it first")
     return parse_rows(lines)
+
+
+def read_capture(path):
+    return _parse_field_text(_run_tshark(_field_command(path)))
+
+
+def read_capture_with_follow(path, stream):
+    """Decode all TCP fields and follow one stream in one TShark traversal.
+
+    TShark writes normal ``-T fields`` rows first, then the ``-z follow`` report.
+    Splitting at the stable follow header lets callers derive the stream index and
+    selected flow from the field rows while reusing the same dissection pass for
+    the TCP-reassembled payload preview.
+    """
+    command = _field_command(path)
+    command += ["-z", f"follow,tcp,raw,{int(stream)}"]
+    output = _run_tshark(command)
+    marker = re.search(r"(?m)^={20,}\r?\nFollow: tcp,raw\r?$", output)
+    if marker is None:
+        abort(422, "TShark did not return the requested TCP follow report")
+    packets = _parse_field_text(output[:marker.start()])
+    return packets, output[marker.start():]
 
 

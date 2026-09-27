@@ -113,7 +113,12 @@ def decode_conversation(path, stream, limit=CONVERSATION_PREVIEW_BYTES, offset=0
         abort(500, "TShark is unavailable")
     if result.returncode:
         abort(422, "TShark could not follow this TCP stream: " + result.stderr[-500:])
-    nodes, raw_chunks, total = parse_follow_raw(result.stdout, limit, offset)
+    return conversation_from_follow_output(result.stdout, stream, limit, offset)
+
+
+def conversation_from_follow_output(text, stream, limit=CONVERSATION_PREVIEW_BYTES, offset=0):
+    """Build the conversation response from an existing TShark follow report."""
+    nodes, raw_chunks, total = parse_follow_raw(text, limit, offset)
     chunks = []
     for entry in raw_chunks:
         data = bytes(entry["data"])
