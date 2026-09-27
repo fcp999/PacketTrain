@@ -16,6 +16,7 @@ from packettrain.config import EXTENSIONS, FIELDS, MAX_BYTES, capture_dir, captu
 from packettrain.decode import (decimal, flag_bits, flag_set, num, parse_rows,
                                read_capture, slicing_report)
 from packettrain.https import analyze_https
+from packettrain.payload import decode_segment
 from packettrain.accounting_tcp import tcp_accounting
 from packettrain.position import infer_capture_side, position_evidence
 from packettrain import accounting_tcp, fingerprint, idle, phases
@@ -25,7 +26,7 @@ from packettrain import accounting_tcp, fingerprint, idle, phases
 __all__ = [
     "app", "analyze_https", "capture_dir", "capture_path", "classify_stream", "decimal",
     "flag_bits", "flag_set", "infer_capture_side", "num", "parse_rows", "position_evidence",
-    "read_capture", "slicing_report", "stream_detail", "summarize",
+    "read_capture", "slicing_report", "stream_detail", "summarize", "decode_segment",
 ]
 
 ROOT = Path(__file__).resolve().parent
@@ -41,6 +42,20 @@ def index():
 def static_assets(name):
     """Serve vendored front-end assets. Only static/ is reachable."""
     return send_from_directory(ROOT / "packettrain" / "static", name)
+
+
+@app.get("/api/payload")
+def payload():
+    """Raw and decoded payload for one captured frame.
+
+    Read on demand rather than with the flow, so a large capture does not pay to
+    hex-encode every segment it will never show.
+    """
+    path = capture_path(request.args.get("file", ""))
+    frame = request.args.get("frame", "")
+    if not frame.isdigit():
+        abort(400, "frame must be a packet number")
+    return jsonify(decode_segment(path, int(frame)))
 
 
 @app.get("/api/files")
