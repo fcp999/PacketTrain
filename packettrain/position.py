@@ -76,51 +76,66 @@ def position_evidence(packets, client, legs):
         elif leg2 >= 3 * max(leg1, 0.001):
             interval_side = "server"
 
-    # TTL inference: the endpoint whose TTL sits at a common initial value is
-    # the nearer one. This is a hint, never proof.
+    # TTL is the primary position factor. Compare estimated hop distance when
+    # both endpoint TTLs are present; handshake asymmetry is supporting evidence
+    # because it also includes endpoint response delay.
     ttl_side = "unknown"
     client_obs = _ttl_observation(client_ttl)
     server_obs = _ttl_observation(server_ttl)
+
+    def ttl_hops(obs):
+        if not obs:
+            return None
+        if obs["hint"] == "at-initial":
+            return 0
+        if obs["hint"] == "few-hops":
+            return obs.get("hops")
+        return None
+
     if client_obs and server_obs:
-        client_at_initial = client_obs["hint"] == "at-initial"
-        server_at_initial = server_obs["hint"] == "at-initial"
-        if client_at_initial and not server_at_initial:
+        client_hops, server_hops = ttl_hops(client_obs), ttl_hops(server_obs)
+        if client_hops is not None and server_hops is not None and client_hops != server_hops:
+            ttl_side = "client" if client_hops < server_hops else "server"
+        elif client_hops is not None and server_hops is None:
             ttl_side = "client"
-        elif server_at_initial and not client_at_initial:
+        elif server_hops is not None and client_hops is None:
             ttl_side = "server"
-        elif client_at_initial and server_at_initial:
-            # Both match a common initial value. The nearer endpoint is still
-            # unidentified, but this is a real observation worth surfacing: a
-            # matched pair usually means the capture sits near both stacks or
-            # the initial values are not what we assumed.
+        elif client_hops is not None and client_hops == server_hops:
             observations.append({
                 "kind": "ttl-pair",
-                "note": (f"Both endpoints show a common initial TTL "
+                "note": (f"Both endpoints have the same inferred TTL distance "
                          f"(client {client_ttl}, server {server_ttl}); TTL does not "
                          "distinguish the nearer endpoint."),
             })
 
-    if interval_side != "unknown" and ttl_side != "unknown" and interval_side != ttl_side:
-        conflicts.append(
-            f"Handshake timing suggests near {interval_side} but TTL suggests near {ttl_side}")
-        side, confidence = "unknown", "low"
+    if ttl_side != "unknown":
+        side = ttl_side
+        if interval_side == ttl_side:
+            confidence = "high"
+        elif interval_side != "unknown":
+            confidence = "moderate"
+            conflicts.append(
+                f"TTL (primary) suggests near {ttl_side}; handshake timing "
+                f"(supporting) suggests near {interval_side}")
+        else:
+            confidence = "moderate"
+        primary_factor = "ttl"
     elif interval_side != "unknown":
-        side = interval_side
-        confidence = "moderate" if ttl_side == "unknown" else "high"
-    elif ttl_side != "unknown":
-        side, confidence = ttl_side, "low"
+        side, confidence = interval_side, "moderate"
+        primary_factor = "handshake-timing"
     else:
         side, confidence = "unknown", "low"
+        primary_factor = "none"
 
     if side == "unknown" and not conflicts:
         conflicts.append("No handshake timing or TTL evidence established a position")
 
-    return {"side": side, "confidence": confidence, "evidence": observations,
-            "conflicts": conflicts,
-            "limitation": ("Position is inferred, not measured. TTL is a proximity hint "
-                           "only: initial values are assumed and a proxy, NAT or a "
-                           "non-standard stack defeats it. Timings include host "
-                           "response delay at the far endpoint.")}
+    return {"side": side, "confidence": confidence, "primary_factor": primary_factor,
+            "evidence": observations, "conflicts": conflicts,
+            "limitation": ("Position is inferred, not measured. TTL is the primary factor, "
+                           "but remains a proximity hint: initial values are assumed and "
+                           "a proxy, NAT or non-standard stack defeats it. Handshake "
+                           "timing is supporting evidence and includes host response delay.")}
 
 
 def infer_capture_side(packets, client, legs):
