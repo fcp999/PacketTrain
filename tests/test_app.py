@@ -1413,3 +1413,69 @@ def test_bootstrap_rejects_invalid_stream_before_running_tshark(tmp_path, monkey
     )
     assert response.status_code == 400
     assert called is False
+
+
+def test_index_manifest_summaries_preserve_client_direction(tmp_path, monkeypatch):
+    import sqlite3
+    from packettrain import indexing
+
+    capture = tmp_path / "sample.pcap"
+    capture.write_bytes(b"pcap")
+    cache = tmp_path / "cache"
+    monkeypatch.setattr(indexing, "INDEX_DIR", cache)
+    directory = indexing.paths(capture)["dir"]
+    directory.mkdir(parents=True)
+    (directory / "READY").write_text("ready")
+    (directory / "refs.bin").write_bytes(b"")
+    connection = sqlite3.connect(directory / "capture.sqlite")
+    connection.execute("""CREATE TABLE flows(
+        id INTEGER,left_addr TEXT,left_port INTEGER,right_addr TEXT,right_port INTEGER,
+        first_ts_ns INTEGER,last_ts_ns INTEGER,packets INTEGER,payload_bytes INTEGER,
+        left_payload_bytes INTEGER,right_payload_bytes INTEGER,client_is_left INTEGER)""")
+    connection.execute("INSERT INTO flows VALUES(0,'192.0.2.10',443,'198.51.100.20',51000,0,2000000000,12,300000,290000,10000,0)")
+    connection.commit()
+    connection.close()
+
+    summary = indexing.stream_summaries(capture)[0]
+    assert summary["client"] == "198.51.100.20"
+    assert summary["server"] == "192.0.2.10"
+    assert summary["pattern"] == "Bulk download pattern"
+    assert summary["duration_ms"] == 2000
+
+
+def test_index_reference_chain_returns_original_frames(tmp_path, monkeypatch):
+    import sqlite3
+    import struct
+    from packettrain import indexing
+
+    capture = tmp_path / "sample.pcap"
+    capture.write_bytes(b"pcap")
+    cache = tmp_path / "cache"
+    monkeypatch.setattr(indexing, "INDEX_DIR", cache)
+    directory = indexing.paths(capture)["dir"]
+    directory.mkdir(parents=True)
+    (directory / "READY").write_text("ready")
+    connection = sqlite3.connect(directory / "capture.sqlite")
+    connection.execute("CREATE TABLE flows(id INTEGER,last_ref INTEGER,packets INTEGER)")
+    connection.execute("INSERT INTO flows VALUES(7,2,3)")
+    connection.commit()
+    connection.close()
+    records = []
+    for previous, frame in [(indexing.NO_REF, 101), (0, 205), (1, 999)]:
+        records.append(struct.pack("<QIIQII", 0, 0, frame, previous, 7, 0))
+    (directory / "refs.bin").write_bytes(b"".join(records))
+
+    assert indexing.original_frames(capture, 7) == [101, 205, 999]
+
+
+def test_index_api_returns_202_while_background_build_runs(tmp_path, monkeypatch):
+    from packettrain import indexing
+
+    monkeypatch.setattr(ptconfig, "PCAP_DIR", tmp_path)
+    (tmp_path / "sample.pcap").write_bytes(b"capture")
+    monkeypatch.setattr(indexing, "request_index", lambda path: {
+        "supported": True, "state": "indexing", "frame": 1000, "flows": 12,
+    })
+    response = packettrain.app.test_client().get("/api/index?file=sample.pcap")
+    assert response.status_code == 202
+    assert response.json["frame"] == 1000

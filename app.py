@@ -6,6 +6,7 @@ packettrain.behavior, and TLS handling in packettrain.https.
 """
 import math
 import re
+import sqlite3
 import subprocess
 from pathlib import Path
 
@@ -13,7 +14,7 @@ from flask import Flask, abort, jsonify, request, send_from_directory
 
 from packettrain.accounting import stream_detail, summarize
 from packettrain.behavior import classify_stream
-from packettrain.config import EXTENSIONS, FIELDS, MAX_BYTES, capture_dir, capture_path  # noqa: F401
+from packettrain.config import EXTENSIONS, FIELDS, MAX_BYTES, MAX_PACKETS, capture_dir, capture_path  # noqa: F401
 from packettrain.decode import (decimal, flag_bits, flag_set, num, parse_rows,
                                read_capture, read_capture_with_follow, slicing_report)
 from packettrain.https import analyze_https
@@ -21,7 +22,7 @@ from packettrain.payload import (CONVERSATION_PREVIEW_BYTES, MAX_CONVERSATION_PA
                                  conversation_from_follow_output, decode_conversation, decode_segment)
 from packettrain.accounting_tcp import tcp_accounting
 from packettrain.position import infer_capture_side, position_evidence
-from packettrain import accounting_tcp, fingerprint, idle, phases
+from packettrain import accounting_tcp, fingerprint, idle, phases, indexing
 
 # Re-exported so callers that imported these from the app module keep working.
 # The package modules are the real owners; this is a compatibility surface.
@@ -58,7 +59,20 @@ def conversation_payload():
     offset_raw = request.args.get("offset", "0")
     if not re.fullmatch(r"\d{1,12}", offset_raw):
         abort(400, "Invalid payload offset")
-    return jsonify(decode_conversation(path, int(raw), limit, int(offset_raw)))
+    selected = int(raw)
+    if indexing.supported(path) and indexing.is_ready(path):
+        try:
+            if indexing.flow_packet_count(path, selected) > MAX_PACKETS:
+                abort(413, "Selected flow exceeds MAX_PACKETS")
+            with indexing.extracted_flow(path, selected) as extracted:
+                result = decode_conversation(extracted, 0, limit, int(offset_raw))
+            result["stream"] = selected
+            return jsonify(result)
+        except KeyError:
+            abort(404, "TCP stream not found")
+        except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+            abort(422, "Indexed flow extraction failed: " + str(exc))
+    return jsonify(decode_conversation(path, selected, limit, int(offset_raw)))
 
 
 @app.get("/api/payload")
@@ -72,7 +86,25 @@ def payload():
     frame = request.args.get("frame", "")
     if not frame.isdigit():
         abort(400, "frame must be a packet number")
-    return jsonify(decode_segment(path, int(frame)))
+    original_frame = int(frame)
+    raw_stream = request.args.get("stream", "")
+    if raw_stream and re.fullmatch(r"\d{1,8}", raw_stream) and indexing.supported(path) \
+            and indexing.is_ready(path):
+        selected = int(raw_stream)
+        try:
+            if indexing.flow_packet_count(path, selected) > MAX_PACKETS:
+                abort(413, "Selected flow exceeds MAX_PACKETS")
+            frames = indexing.original_frames(path, selected)
+            local_frame = frames.index(original_frame) + 1
+            with indexing.extracted_flow(path, selected) as extracted:
+                result = decode_segment(extracted, local_frame)
+            result["frame"] = original_frame
+            return jsonify(result)
+        except (KeyError, ValueError):
+            abort(404, "Frame not found in indexed flow")
+        except (OSError, RuntimeError, sqlite3.Error) as exc:
+            abort(422, "Indexed flow extraction failed: " + str(exc))
+    return jsonify(decode_segment(path, original_frame))
 
 
 @app.get("/api/files")
@@ -87,6 +119,19 @@ def files():
                     "directory": str(directory)})
 
 
+@app.get("/api/index")
+def capture_index():
+    """Start or inspect the lightweight flow index for one capture."""
+    path = capture_path(request.args.get("file", ""))
+    state = indexing.request_index(path)
+    if state["state"] == "ready":
+        try:
+            state["streams"] = indexing.stream_summaries(path)
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            abort(422, "Could not read flow index: " + str(exc))
+    return jsonify(state), (202 if state["state"] == "indexing" else 200)
+
+
 @app.get("/api/bootstrap")
 def bootstrap():
     """Stream index, selected flow, and payload preview from one TShark pass."""
@@ -95,8 +140,35 @@ def bootstrap():
     if not re.fullmatch(r"\d{1,8}", raw):
         abort(400, "Invalid stream")
     selected = int(raw)
-    packets, follow_output = read_capture_with_follow(path, selected)
-    summaries = summarize(packets)
+    indexed = indexing.supported(path)
+    if indexed:
+        state = indexing.request_index(path)
+        if state["state"] == "indexing":
+            return jsonify(state), 202
+        if state["state"] == "error":
+            abort(422, "Flow indexing failed: " + state.get("error", "unknown error"))
+    try:
+        if indexed and indexing.is_ready(path):
+            if indexing.flow_packet_count(path, selected) > MAX_PACKETS:
+                abort(413, "Selected flow exceeds MAX_PACKETS")
+            frames = indexing.original_frames(path, selected)
+            with indexing.extracted_flow(path, selected) as extracted:
+                packets, follow_output = read_capture_with_follow(extracted, 0)
+            for packet in packets:
+                local_frame = packet["frame"]
+                if local_frame < 1 or local_frame > len(frames):
+                    abort(422, "Indexed frame mapping is inconsistent")
+                packet["frame"] = frames[local_frame - 1]
+                packet["stream"] = selected
+            include_streams = request.args.get("include_streams", "1") != "0"
+            summaries = indexing.stream_summaries(path, None if include_streams else selected)
+        else:
+            packets, follow_output = read_capture_with_follow(path, selected)
+            summaries = summarize(packets)
+    except KeyError:
+        abort(404, "TCP stream not found")
+    except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+        abort(422, "Indexed flow analysis failed: " + str(exc))
     if selected not in {item["id"] for item in summaries}:
         abort(404, "TCP stream not found")
     detail = stream_detail(packets, selected)
@@ -112,12 +184,13 @@ def bootstrap():
         detail["packets"], mode="smart", speed=effective_speed
     )
     return jsonify({
-        "streams": summaries,
+        "streams": summaries if not indexed or request.args.get("include_streams", "1") != "0" else [],
         "flow": detail,
         "payload": conversation_from_follow_output(
             follow_output, selected, CONVERSATION_PREVIEW_BYTES, 0
         ),
         "tshark_passes": 1,
+        "indexed": indexed and indexing.is_ready(path),
     })
 
 
@@ -132,8 +205,28 @@ def flow():
     raw = request.args.get("stream", "")
     if not re.fullmatch(r"\d{1,8}", raw):
         abort(400, "Invalid stream")
-    packets = read_capture(capture_path(request.args.get("file", "")))
-    detail = stream_detail(packets, int(raw))
+    path = capture_path(request.args.get("file", ""))
+    selected = int(raw)
+    if indexing.supported(path) and indexing.is_ready(path):
+        try:
+            if indexing.flow_packet_count(path, selected) > MAX_PACKETS:
+                abort(413, "Selected flow exceeds MAX_PACKETS")
+            frames = indexing.original_frames(path, selected)
+            with indexing.extracted_flow(path, selected) as extracted:
+                packets = read_capture(extracted)
+            for packet in packets:
+                local_frame = packet["frame"]
+                if local_frame < 1 or local_frame > len(frames):
+                    abort(422, "Indexed frame mapping is inconsistent")
+                packet["frame"] = frames[local_frame - 1]
+                packet["stream"] = selected
+        except KeyError:
+            abort(404, "TCP stream not found")
+        except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+            abort(422, "Indexed flow analysis failed: " + str(exc))
+    else:
+        packets = read_capture(path)
+    detail = stream_detail(packets, selected)
     # Compression is a playback concern, so it is computed only when asked for.
     mode = request.args.get("mode", "")
     # Validate speed whenever it is supplied, even without a mode, rather than

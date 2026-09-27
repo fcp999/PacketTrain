@@ -9,7 +9,12 @@ services:
       PCAP_DIR: /pcaps
       MAX_PCAP_BYTES: 268435456
       MAX_PACKETS: 100000
+      PACKETTRAIN_INDEX_DIR: /cache
     volumes:
       - ${PCAP_PATH:-./pcaps}:/pcaps:ro
+      - packettrain-cache:/cache
     security_opt:
       - no-new-privileges:true
+
+volumes:
+  packettrain-cache:
