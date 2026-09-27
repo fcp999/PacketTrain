@@ -1350,3 +1350,66 @@ def test_capture_position_uses_ttl_as_primary_when_timing_conflicts():
     assert ev["side"] == "server"
     assert ev["confidence"] == "moderate"
     assert any("TTL (primary)" in c and "handshake timing" in c for c in ev["conflicts"])
+
+
+def test_bootstrap_uses_one_tshark_pass_for_stream_flow_and_payload(tmp_path, monkeypatch):
+    monkeypatch.setattr(ptconfig, "PCAP_DIR", tmp_path)
+    (tmp_path / "sample.pcap").write_bytes(b"sample")
+    lines = [
+        row(1, 100.0, 3, 1, 0, {"tcp.flags.syn": "1"}),
+        row(2, 100.2, 3, 2, 5, {"tcp.flags.push": "1"}),
+    ]
+    follow = """===================================================================
+Follow: tcp,raw
+Filter: tcp.stream eq 3
+Node 0: 192.0.2.1:50000
+Node 1: 198.51.100.2:443
+48656c6c6f
+\t576f726c64
+===================================================================
+"""
+
+    class Completed:
+        returncode = 0
+        stdout = "\n".join(lines) + "\n" + follow
+        stderr = ""
+
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        assert "-z" in command
+        assert "follow,tcp,raw,3" in command
+        return Completed()
+
+    monkeypatch.setattr(packettrain.subprocess, "run", fake_run)
+    response = packettrain.app.test_client().get(
+        "/api/bootstrap?file=sample.pcap&stream=3"
+    )
+    assert response.status_code == 200
+    data = response.get_json()
+    assert len(calls) == 1
+    assert data["tshark_passes"] == 1
+    assert data["streams"][0]["id"] == 3
+    assert data["flow"]["summary"]["id"] == 3
+    assert data["flow"]["packets"][1]["time_ms"] == pytest.approx(200)
+    assert data["payload"]["total_length"] == 10
+    assert [c["ascii"] for c in data["payload"]["chunks"]] == ["Hello", "World"]
+
+
+def test_bootstrap_rejects_invalid_stream_before_running_tshark(tmp_path, monkeypatch):
+    monkeypatch.setattr(ptconfig, "PCAP_DIR", tmp_path)
+    (tmp_path / "sample.pcap").write_bytes(b"sample")
+    called = False
+
+    def fake_run(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("must not run")
+
+    monkeypatch.setattr(packettrain.subprocess, "run", fake_run)
+    response = packettrain.app.test_client().get(
+        "/api/bootstrap?file=sample.pcap&stream=bad"
+    )
+    assert response.status_code == 400
+    assert called is False
