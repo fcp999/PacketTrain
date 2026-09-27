@@ -50,12 +50,17 @@ function renderBounce(){const el=$('bounce');if(!flow||!flow.packets||!flow.pack
  // Arrows: slant from the sending lane to the receiving lane at the packet time.
  for(const p of packets){const outward=p.direction==='out',payload=p.length>0,ms=p.time_ms;if(ms<t0||ms>t1)continue;
   const y=yFor(ms);
-  // Captured observations start at their lane; inferred remote arrival is shown
-  // as the sloped end, which is visibly distinct from the captured timestamp.
-  const yArrive=isLocal(p)?y:y+Math.max(1,travel/span*(H-padTop-padBot));
+  // Time is the vertical axis, so every arrow must slope. A locally captured
+  // record is seen being sent: it starts at its own lane at t and would arrive at
+  // the far endpoint one one-way delay later (t+travel). A remotely captured
+  // record is seen on arrival: it was sent at t-travel and reaches its own lane at
+  // t. Either way the vertical extent of the line represents elapsed time.
+  const lag=Math.max(1,travel/span*(H-padTop-padBot));
+  const ySend=isLocal(p)?y:y-lag;
+  const yArrive=isLocal(p)?y+lag:y;
   const x1=outward?laneL+laneW:laneR-laneW,x2=outward?laneR-laneW:laneL+laneW;
   const color=p.retrans?'retry':p.psh&&$('pshToggle').checked?'psh':payload?'data':'ack';
-  const line=svg('line',{x1,y1:y,x2,y2:yArrive,class:'bounce-arrow '+color,'stroke-width':payload?2.5:1.5,opacity:payload?0.95:0.6},el);
+  const line=svg('line',{x1,y1:ySend,x2,y2:yArrive,class:'bounce-arrow '+color,'stroke-width':payload?2.5:1.5,opacity:payload?0.95:0.6},el);
   line.dataset.frame=String(p.frame);bounceArrows.push(line);line.addEventListener('click',()=>selectPacket(p));
   line.append(svg('title',{},line));line.lastChild.textContent=`frame ${p.frame} · ${p.src}:${p.sport} -> ${p.dst}:${p.dport}`;
   let letter=marker(p,false);if(letter&&($('eventsToggle').checked||p.syn||p.fin||p.rst)){let g=svg('text',{x:(x1+x2)/2,y:yArrive-3,'text-anchor':'middle',class:'glyph record-label'},el);g.textContent=letter}
