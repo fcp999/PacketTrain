@@ -51,3 +51,22 @@ On the lab's 795 MiB `haproxy24_1.pcap` fixture:
 - a 5,076,501-packet flow extracted to a 473 MiB PCAP in 1.03 seconds
 
 The previous full TShark pass took 578 seconds on the same capture.
+
+
+## Stage B application integration
+
+PacketTrain builds indexes in a background thread guarded by a cross-worker
+lock file. `/api/index` returns HTTP 202 with frame/flow progress, then returns
+the SQLite stream summaries when ready. The browser polls this endpoint and
+cancels stale loads when the selected capture changes.
+
+Detailed flow, playback, segment payload, and conversation payload requests
+materialize only the selected connection. PacketTrain maps TShark's local frame
+numbers back to original capture frame numbers through `refs.bin`. Temporary
+flow files are removed after each request. Unsupported formats retain the
+whole-capture TShark path.
+
+Indexes are keyed by schema version, filename, source size, and nanosecond
+mtime. A persistent `/cache` Docker volume survives application image updates.
+A selected connection exceeding `MAX_PACKETS` is rejected before extraction or
+TShark analysis.

@@ -55,6 +55,25 @@ Change the host port in `compose.yaml` if 8088 is occupied. A reverse proxy
 can forward ordinary HTTP requests to the published port; WebSockets are not
 required.
 
+## Indexed large captures
+
+Classic Ethernet `.pcap` files are indexed in the background before TShark is
+invoked. The read-only source is scanned once into a persistent Docker volume;
+only the selected TCP connection is then materialized into a temporary PCAP for
+detailed analysis. The browser reports indexing progress and preserves original
+source frame numbers for packet and payload views.
+
+The index stores 32 bytes per TCP packet plus a small SQLite flow manifest. A
+795 MiB, six-million-packet lab capture produced a 185 MiB index in about two
+seconds from a warm filesystem cache. Subsequent small-flow extraction took a
+few milliseconds, followed by TShark's approximately 250 ms startup cost.
+
+`MAX_PACKETS` now applies to the selected flow on this indexed path rather than
+to the whole capture. A single connection over that limit is rejected before
+TShark starts. PCAPNG and non-Ethernet captures continue to use the existing
+TShark fallback while their indexed support is developed. The named
+`packettrain-cache` volume can be removed to invalidate all indexes.
+
 ## Reading the visualization
 
 - Local dot launch times use captured timestamps. Incoming dots arrive at the
@@ -84,9 +103,9 @@ required.
 - RTT uses the long handshake leg when the capture point can be inferred; the
   median TShark ACK RTT sample is a fallback. Neither measures individual
   one-way delays. Override the result if you have a better measured RTT.
-- The first 5,000 packet rows are listed while up to 100,000 packets animate.
-  The default PCAP size limit is 256 MiB. For large captures, split or filter
-  before loading, or raise `MAX_PCAP_BYTES` with enough container memory.
+- The first 5,000 packet rows are listed. `MAX_PACKETS` bounds the selected
+  connection, and the default capture-size limit is 256 MiB. Raise
+  `MAX_PCAP_BYTES` explicitly when the cache volume has enough space.
 
 The interface is intended for an isolated lab or a trusted reverse proxy.
 It does not include user authentication. File selection is constrained to the

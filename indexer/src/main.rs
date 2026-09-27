@@ -82,6 +82,9 @@ struct Flow {
     packets: u64,
     captured_bytes: u64,
     payload_bytes: u64,
+    left_payload_bytes: u64,
+    right_payload_bytes: u64,
+    client_is_left: bool,
     syn_seen: bool,
     fin_mask: u8,
     rst_seen: bool,
@@ -354,6 +357,9 @@ fn scan(source: &Path, out: &Path) -> Result<()> {
                     packets: 0,
                     captured_bytes: 0,
                     payload_bytes: 0,
+                    left_payload_bytes: 0,
+                    right_payload_bytes: 0,
+                    client_is_left: parsed.src_is_left,
                     syn_seen: false,
                     fin_mask: 0,
                     rst_seen: false,
@@ -381,6 +387,11 @@ fn scan(source: &Path, out: &Path) -> Result<()> {
         flow.captured_bytes += incl as u64;
         if !parsed.non_initial_fragment {
             flow.payload_bytes += parsed.payload as u64;
+            if parsed.src_is_left {
+                flow.left_payload_bytes += parsed.payload as u64;
+            } else {
+                flow.right_payload_bytes += parsed.payload as u64;
+            }
             let syn = parsed.flags & 2 != 0;
             let fin = parsed.flags & 1 != 0;
             let rst = parsed.flags & 4 != 0;
@@ -425,8 +436,9 @@ fn scan(source: &Path, out: &Path) -> Result<()> {
       CREATE TABLE flows(id INTEGER PRIMARY KEY,generation INTEGER NOT NULL,family INTEGER NOT NULL,
        left_addr TEXT NOT NULL,left_port INTEGER NOT NULL,right_addr TEXT NOT NULL,right_port INTEGER NOT NULL,
        first_frame INTEGER NOT NULL,last_frame INTEGER NOT NULL,first_ts_ns INTEGER NOT NULL,last_ts_ns INTEGER NOT NULL,
-       packets INTEGER NOT NULL,captured_bytes INTEGER NOT NULL,payload_bytes INTEGER NOT NULL,syn_seen INTEGER NOT NULL,
-       fin_mask INTEGER NOT NULL,rst_seen INTEGER NOT NULL,closed INTEGER NOT NULL,first_ref INTEGER NOT NULL,last_ref INTEGER NOT NULL,
+       packets INTEGER NOT NULL,captured_bytes INTEGER NOT NULL,payload_bytes INTEGER NOT NULL,
+       left_payload_bytes INTEGER NOT NULL,right_payload_bytes INTEGER NOT NULL,client_is_left INTEGER NOT NULL,
+       syn_seen INTEGER NOT NULL,fin_mask INTEGER NOT NULL,rst_seen INTEGER NOT NULL,closed INTEGER NOT NULL,first_ref INTEGER NOT NULL,last_ref INTEGER NOT NULL,
        analysis_state TEXT NOT NULL DEFAULT 'pending');")?;
     let meta = fs::metadata(source)?;
     let mtime = meta.modified()?.duration_since(UNIX_EPOCH)?.as_nanos();
@@ -463,7 +475,7 @@ fn scan(source: &Path, out: &Path) -> Result<()> {
             )?;
         }
         {
-            let mut st=tx.prepare("INSERT INTO flows(id,generation,family,left_addr,left_port,right_addr,right_port,first_frame,last_frame,first_ts_ns,last_ts_ns,packets,captured_bytes,payload_bytes,syn_seen,fin_mask,rst_seen,closed,first_ref,last_ref) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)")?;
+            let mut st=tx.prepare("INSERT INTO flows(id,generation,family,left_addr,left_port,right_addr,right_port,first_frame,last_frame,first_ts_ns,last_ts_ns,packets,captured_bytes,payload_bytes,left_payload_bytes,right_payload_bytes,client_is_left,syn_seen,fin_mask,rst_seen,closed,first_ref,last_ref) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)")?;
             for f in &flows {
                 st.execute(params![
                     f.id,
@@ -480,6 +492,9 @@ fn scan(source: &Path, out: &Path) -> Result<()> {
                     f.packets,
                     f.captured_bytes,
                     f.payload_bytes,
+                    f.left_payload_bytes,
+                    f.right_payload_bytes,
+                    f.client_is_left as u8,
                     f.syn_seen as u8,
                     f.fin_mask,
                     f.rst_seen as u8,
