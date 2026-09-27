@@ -1,0 +1,10 @@
+[package]
+name = "packettrain-index"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+anyhow = "1.0"
+memmap2 = "0.9"
+rusqlite = { version = "0.32", features = ["bundled"] }
