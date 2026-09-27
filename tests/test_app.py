@@ -1318,3 +1318,35 @@ Node 1: 198.51.100.2:80
     nodes, chunks, total = parse_follow_raw(text, limit=5, offset=6)
     assert total == 12
     assert [(c["node"], bytes(c["data"])) for c in chunks] == [(1, b"World")]
+
+
+def test_phase_reports_bit_rate_and_retransmission_byte_percent():
+    lines = [
+        row(1, 0.0, 1, 100, 126_824, {"tcp.flags.ack": "1"}),
+        row(2, 1.6, 1, 126_924, 126_824,
+            {"tcp.flags.ack": "1", "tcp.analysis.retransmission": "1"}),
+    ]
+    phase = packettrain.phases.stream_phases(_timed(lines))["phases"][0]
+    assert phase["payload_bytes"] == 253_648
+    assert phase["bits_per_second"] == pytest.approx(1_268_240)
+    assert phase["retransmission_bytes"] == 126_824
+    assert phase["retransmission_percent"] == pytest.approx(50.0)
+    assert "253,648 payload bytes over 1.6s (1,268,240 bit/s)" in phase["evidence"]
+    assert any("126,824 of 253,648" in item and "50.0%" in item
+               for item in phase["alternatives"])
+
+
+def test_capture_position_uses_ttl_as_primary_when_timing_conflicts():
+    lines = [
+        row(1, 0.000, 1, 1, 0, {"tcp.flags.syn": "1", "ip.ttl": "60"}),
+        row(2, 0.100, 1, 2, 0,
+            {"tcp.flags.syn": "1", "tcp.flags.ack": "1", "ip.ttl": "128"}),
+        row(3, 0.101, 1, 3, 0, {"tcp.flags.ack": "1"}),
+    ]
+    packets = packettrain.parse_rows(lines)
+    packets[1].update(src="198.51.100.2", dst="192.0.2.1", sport=443, dport=50000)
+    ev = packettrain.position_evidence(packets, ("192.0.2.1", 50000), (100.0, 1.0))
+    assert ev["primary_factor"] == "ttl"
+    assert ev["side"] == "server"
+    assert ev["confidence"] == "moderate"
+    assert any("TTL (primary)" in c and "handshake timing" in c for c in ev["conflicts"])

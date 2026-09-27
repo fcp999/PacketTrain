@@ -60,29 +60,49 @@ def _classify_run(run):
     dominant = max(out_bytes, in_bytes)
     share = dominant / total if total else 0.0
     direction = "out" if out_bytes >= in_bytes else "in"
+    bits_per_second = (total * 8 / span_s) if span_s > 0 else None
+    retransmission_bytes = sum(p["length"] for p in payload if p.get("retrans"))
+    retransmission_percent = (retransmission_bytes / total * 100) if total else 0.0
+    rate_evidence = f"{total:,} payload bytes over {span_s:.1f}s"
+    if bits_per_second is not None:
+        rate_evidence += f" ({bits_per_second:,.0f} bit/s)"
+    else:
+        rate_evidence += " (rate unavailable: zero-duration observation)"
+    retransmission_note = (
+        f"Retransmissions present: {retransmission_bytes:,} of {total:,} captured "
+        f"payload bytes ({retransmission_percent:.1f}%) may be repeats"
+        if retransmission_bytes else None
+    )
+    metrics = {
+        "payload_bytes": total,
+        "bits_per_second": round(bits_per_second, 3) if bits_per_second is not None else None,
+        "retransmission_bytes": retransmission_bytes,
+        "retransmission_percent": round(retransmission_percent, 3),
+    }
 
     if total >= THRESHOLDS["bulk_min_bytes"] and share >= THRESHOLDS["bulk_min_share"]:
         alternatives = []
         if any(p.get("tls_record") for p in packets):
             alternatives.append("Encrypted traffic; a bulk shape does not prove a file transfer")
-            if any(p.get("retrans") for p in packets):
-                alternatives.append("Retransmissions present; some bytes may be repeats")
+        if retransmission_note:
+            alternatives.append(retransmission_note)
         return {"label": "Bulk transfer", "direction": direction,
-                "evidence": [f"{total:,} payload bytes over {span_s:.1f}s",
-                             f"{share:.0%} in one direction",
+                "evidence": [rate_evidence, f"{share:.0%} in one direction",
                              f"{len(payload)} payload records"],
-                "alternatives": alternatives}
+                "alternatives": alternatives, **metrics}
 
     if total <= THRESHOLDS["small_max_bytes"]:
         turns = sum(1 for a, b in zip(packets, packets[1:])
                     if a["direction"] != b["direction"])
         return {"label": "Small exchange",
-                "evidence": [f"{total:,} payload bytes", f"{turns} direction changes"],
-                "alternatives": []}
+                "evidence": [rate_evidence, f"{turns} direction changes"],
+                "alternatives": [retransmission_note] if retransmission_note else [],
+                **metrics}
 
     return {"label": "Payload exchange",
-            "evidence": [f"{total:,} payload bytes", f"{span_s:.1f}s"],
-            "alternatives": []}
+            "evidence": [rate_evidence],
+            "alternatives": [retransmission_note] if retransmission_note else [],
+            **metrics}
 
 
 def stream_phases(packets):
@@ -111,6 +131,10 @@ def stream_phases(packets):
         }
         if "direction" in verdict:
             phase["direction"] = verdict["direction"]
+        for key in ("payload_bytes", "bits_per_second", "retransmission_bytes",
+                    "retransmission_percent"):
+            if key in verdict:
+                phase[key] = verdict[key]
         phases.append(phase)
 
         if index + 1 < len(runs):
