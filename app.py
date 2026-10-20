@@ -23,7 +23,7 @@ from packettrain.payload import (CONVERSATION_PREVIEW_BYTES, MAX_CONVERSATION_PA
 from packettrain.accounting_tcp import tcp_accounting
 from packettrain.position import infer_capture_side, position_evidence
 from packettrain import accounting_tcp, fingerprint, idle, phases, indexing
-from packettrain.topology import build_topology
+from packettrain.topology import build_topology, topology_from_pairs
 
 # Re-exported so callers that imported these from the app module keep working.
 # The package modules are the real owners; this is a compatibility surface.
@@ -66,7 +66,7 @@ def topology_data():
     state = indexing.request_index(path)
     if state["state"] != "ready":
         return jsonify(state), (202 if state["state"] == "indexing" else 422)
-    return jsonify(build_topology(indexing.stream_summaries(path), int(raw)))
+    return jsonify(topology_from_pairs(indexing.topology_pairs(path, int(raw))))
 
 
 @app.get("/api/conversation-payload")
