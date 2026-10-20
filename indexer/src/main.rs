@@ -735,8 +735,16 @@ fn topology(index: &Path, limit: u32) -> Result<()> {
     let mut stmt = db.prepare(
         "SELECT CASE WHEN left_addr < right_addr THEN left_addr ELSE right_addr END AS a,
                 CASE WHEN left_addr < right_addr THEN right_addr ELSE left_addr END AS b,
-                SUM(payload_bytes), SUM(packets), COUNT(*), MIN(id), MIN(
-                    CASE WHEN client_is_left=1 THEN right_port ELSE left_port END)
+                SUM(payload_bytes), SUM(packets), COUNT(*),
+                (SELECT f2.id FROM flows f2 WHERE
+                    (CASE WHEN f2.left_addr < f2.right_addr THEN f2.left_addr ELSE f2.right_addr END) = a
+                    AND (CASE WHEN f2.left_addr < f2.right_addr THEN f2.right_addr ELSE f2.left_addr END) = b
+                 ORDER BY f2.payload_bytes DESC, f2.id ASC LIMIT 1),
+                MIN(CASE WHEN client_is_left=1 THEN right_port ELSE left_port END),
+                SUM(captured_bytes), SUM(CASE WHEN rst_seen=1 THEN 1 ELSE 0 END),
+                SUM(CASE WHEN syn_seen=1 THEN 1 ELSE 0 END),
+                SUM(CASE WHEN closed=1 THEN 1 ELSE 0 END),
+                MIN(first_ts_ns), MAX(last_ts_ns)
          FROM flows GROUP BY a,b ORDER BY SUM(payload_bytes) DESC, SUM(packets) DESC
          LIMIT ?1",
     )?;
@@ -745,12 +753,15 @@ fn topology(index: &Path, limit: u32) -> Result<()> {
             row.get::<_, String>(0)?, row.get::<_, String>(1)?,
             row.get::<_, i64>(2)?, row.get::<_, i64>(3)?,
             row.get::<_, i64>(4)?, row.get::<_, i64>(5)?,
-            row.get::<_, i64>(6)?,
+            row.get::<_, i64>(6)?, row.get::<_, i64>(7)?,
+            row.get::<_, i64>(8)?, row.get::<_, i64>(9)?,
+            row.get::<_, i64>(10)?, row.get::<_, i64>(11)?,
+            row.get::<_, i64>(12)?,
         ))
     })?;
     for row in rows {
-        let (a,b,bytes,packets,flows,stream,port) = row?;
-        println!("{a}\t{b}\t{bytes}\t{packets}\t{flows}\t{stream}\t{port}");
+        let (a,b,bytes,packets,flows,stream,port,wire,rsts,syns,closed,first,last) = row?;
+        println!("{a}\t{b}\t{bytes}\t{packets}\t{flows}\t{stream}\t{port}\t{wire}\t{rsts}\t{syns}\t{closed}\t{first}\t{last}");
     }
     Ok(())
 }
