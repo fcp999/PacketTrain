@@ -26,10 +26,11 @@ MIN_STALL_MS = 10.0
 # stall, but flagged as unresolved rather than assumed persistent.
 UNRESOLVED_NOTE = "capture ended while the window was still closed"
 
-# Zero-window advertisements arriving back-to-back within this gap are treated as
-# one episode: window probes and duplicate advertisements do not each start a
-# new stall.
-EPISODE_COALESCE_MS = 1000.0
+# Episode semantics: an episode runs from the first zero-window advertisement
+# until that endpoint next advertises a non-zero window. Advertisements in
+# between are probes belonging to the same stall, however far apart they are --
+# a receiver that stays stuck emits probes at a widening backoff, and each one
+# is the same closed window, not a new one.
 
 
 def _time_ms(packet, origin):
@@ -62,30 +63,71 @@ def _is_stall(packet):
     return bool(packet.get("window_present")) and packet.get("window") == 0
 
 
-def _episodes(advertisements, origin):
-    """Group zero-window advertisements into contiguous episodes."""
-    episodes = []
-    current = None
+def _episodes(advertisements, group, direction, origin):
+    """Split a direction's advertisements into stalls.
+
+    An episode opens at the first zero-window advertisement and closes when the
+    same endpoint next advertises a non-zero window. Advertisements arriving
+    while the window stays closed are probes within that one episode, however
+    far apart they are: a stuck receiver emits probes at a widening backoff and
+    each one reports the same closed window.
+
+    The reopening is searched once the probes belonging to an episode have been
+    collected, not per probe -- otherwise the first probe would close against a
+    reopening that actually terminates a later stall.
+    """
+    # Time-ordered advertisements for this direction.
+    timed = []
     for packet in advertisements:
         time_ms = _time_ms(packet, origin)
-        if time_ms is None:
-            continue
-        if current is None or time_ms - current["last_probe_ms"] > EPISODE_COALESCE_MS:
-            if current is not None:
-                episodes.append(current)
-            current = {
-                "start_ms": time_ms,
-                "last_probe_ms": time_ms,
-                "probes": 0,
-                "frames": [],
-            }
-        current["last_probe_ms"] = time_ms
-        current["probes"] += 1
-        if len(current["frames"]) < 20:
-            current["frames"].append(packet.get("frame"))
-    if current is not None:
-        episodes.append(current)
+        if time_ms is not None:
+            timed.append((time_ms, packet))
+    timed.sort(key=lambda item: item[0])
+
+    episodes = []
+    index = 0
+    while index < len(timed):
+        start_ms, first = timed[index]
+        frames = [first.get("frame")]
+        probe_times = [start_ms]
+        probes = 1
+        last_probe_ms = start_ms
+        index += 1
+        # Collect probes that arrive while the window is still closed: that is,
+        # before the reopening that follows the first probe.
+        reopening = _recovery_after(group, direction, start_ms, origin)
+        while index < len(timed) and (reopening is None or timed[index][0] < reopening):
+            probe_ms, probe = timed[index]
+            probes += 1
+            last_probe_ms = probe_ms
+            if len(frames) < 20:
+                frames.append(probe.get("frame"))
+            probe_times.append(probe_ms)
+            index += 1
+        episodes.append({
+            "probe_times_ms": [round(t, 3) for t in probe_times],
+            "start_ms": start_ms,
+            "last_probe_ms": last_probe_ms,
+            "probes": probes,
+            "frames": frames,
+            "recovered_at": reopening,
+        })
     return episodes
+
+
+def _recovery_after(group, direction, after_ms, origin):
+    """First non-zero window advertised by ``direction`` after ``after_ms``."""
+    for candidate in group:
+        if _direction_of(candidate) != direction:
+            continue
+        candidate_ms = _time_ms(candidate, origin)
+        if candidate_ms is None or candidate_ms <= after_ms:
+            continue
+        if not candidate.get("window_present"):
+            continue
+        if candidate.get("window", 0) > 0:
+            return candidate_ms
+    return None
 
 
 def receiver_window_analysis(group):
@@ -128,21 +170,8 @@ def receiver_window_analysis(group):
 
     episodes = []
     for direction, packets in by_direction.items():
-        for episode in _episodes(packets, origin):
-            # Recovery is the first advertisement from the same endpoint with a
-            # non-zero window after the last zero.
-            recovered_at = None
-            for candidate in group:
-                if _direction_of(candidate) != direction:
-                    continue
-                candidate_ms = _time_ms(candidate, origin)
-                if candidate_ms is None or candidate_ms <= episode["last_probe_ms"]:
-                    continue
-                if not candidate.get("window_present"):
-                    continue
-                if candidate.get("window", 0) > 0:
-                    recovered_at = candidate_ms
-                    break
+        for episode in _episodes(packets, group, direction, origin):
+            recovered_at = episode["recovered_at"]
 
             if recovered_at is None:
                 duration_ms = (capture_end_ms - episode["start_ms"]
@@ -154,13 +183,21 @@ def receiver_window_analysis(group):
                 recovered = True
                 note = None
 
+            probe_times = episode.get("probe_times_ms", [])
+            # Gaps between probes show the backoff a stuck receiver is applying:
+            # a widening interval means it keeps finding no buffer space.
+            probe_gaps = [round(b - a, 3) for a, b in zip(probe_times, probe_times[1:])]
             episodes.append({
+                "index": len(episodes),
                 "direction": direction,
                 "constrained_direction": ("server" if direction == "client" else "client"),
                 "start_ms": episode["start_ms"],
                 "duration_ms": (round(duration_ms, 3)
                                 if duration_ms is not None else None),
                 "probes": episode["probes"],
+                "probe_times_ms": probe_times,
+                "probe_gaps_ms": probe_gaps,
+                "probe_backoff": bool(probe_gaps) and probe_gaps[-1] > probe_gaps[0],
                 "recovered": recovered,
                 "note": note,
                 "frames": episode["frames"],

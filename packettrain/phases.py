@@ -105,7 +105,68 @@ def _classify_run(run):
             **metrics}
 
 
-def stream_phases(packets):
+# A zero-window advertisement this long before a pause still explains it: the
+# probes that keep the window closed arrive at the probe interval, and the last
+# one can precede the observed silence by up to that interval.
+STALL_LOOKBACK_MS = 1_000.0
+
+
+def _window_stall(ordered, pause_start, pause_end):
+    """Zero-window advertisements explaining a pause, or None.
+
+    Only explicitly advertised zeros count. An absent window field means the
+    capture could not see it, which is not evidence of a stall.
+    """
+    if pause_end <= pause_start:
+        return None
+    hits = [p for p in ordered
+            if p.get("window_present") and p.get("window") == 0
+            and pause_start - STALL_LOOKBACK_MS <= p.get("time_ms", -1) <= pause_end]
+    if not hits:
+        return None
+    advertiser = hits[0].get("src", "unknown")
+    return {
+        "advertisements": len(hits),
+        "advertiser": advertiser,
+        "frames": [p["frame"] for p in hits[:20]],
+        "first_ms": round(hits[0].get("time_ms", 0.0), 3),
+        "last_ms": round(hits[-1].get("time_ms", 0.0), 3),
+    }
+
+
+def _fmt_ms(value):
+    """Human-readable duration for evidence text."""
+    if value is None:
+        return "an unbounded time"
+    if value >= 1000.0:
+        return f"{value / 1000.0:.1f}s"
+    return f"{value:.0f}ms"
+
+
+def _matching_episode(episodes, pause_start, pause_end, advertiser):
+    """The episode a pause falls inside, or None.
+
+    An episode runs from the first zero-window advertisement until the window
+    reopens. A pause overlapping that span is part of the same stall even when
+    the pause is a shorter sub-interval of it.
+    """
+    if not episodes:
+        return None
+    for episode in episodes:
+        start = episode.get("start_ms")
+        if start is None:
+            continue
+        duration = episode.get("duration_ms")
+        end = (start + duration) if duration is not None else None
+        if pause_end < start:
+            continue
+        if end is not None and pause_start > end:
+            continue
+        return episode
+    return None
+
+
+def stream_phases(packets, window_episodes=None):
     """Segment a stream into phases with bounds, evidence and frame references."""
     ordered = sorted(packets, key=lambda p: p["time_ms"])
     if not ordered:
@@ -139,18 +200,56 @@ def stream_phases(packets):
 
         if index + 1 < len(runs):
             gap_s = (runs[index + 1]["start"] - run["end"]) / 1000.0
-            phases.append({
+            pause_start = run["end"]
+            pause_end = runs[index + 1]["start"]
+            evidence = [f"{gap_s:.1f}s with no captured activity"]
+            alternatives = ["An application pause and a network gap look the "
+                            "same at one capture point"]
+            pause = {
                 "index": len(phases),
                 "label": "Payload pause" if gap_s < 30 else "Idle",
-                "start_ms": round(run["end"], 3),
-                "end_ms": round(runs[index + 1]["start"], 3),
-                "duration_ms": round((runs[index + 1]["start"] - run["end"]), 3),
+                "start_ms": round(pause_start, 3),
+                "end_ms": round(pause_end, 3),
+                "duration_ms": round((pause_end - pause_start), 3),
                 "packets": 0,
                 "frames": [],
-                "evidence": [f"{gap_s:.1f}s with no captured activity"],
-                "alternatives": ["An application pause and a network gap look the "
-                                 "same at one capture point"],
-            })
+                "evidence": evidence,
+                "alternatives": alternatives,
+            }
+            # A pause bounded by a closed receiver window is not ambiguous: the
+            # silence is flow control, which is directly observable. Report it
+            # rather than leaving the application-versus-network hedge standing.
+            stall = _window_stall(ordered, pause_start, pause_end)
+            if stall:
+                # Point at the episode this pause belongs to. A single stall can
+                # span several pauses, so without the reference the phase table
+                # would report four stalls where the episode list reports one.
+                episode = _matching_episode(window_episodes, pause_start, pause_end,
+                                           stall["advertiser"])
+                if episode is not None:
+                    stall["episode_index"] = episode["index"]
+                    stall["episode_duration_ms"] = episode["duration_ms"]
+                    stall["episode_probes"] = episode["probes"]
+                    stall["episode_probe_gaps_ms"] = episode.get("probe_gaps_ms", [])
+                    stall["part_of_larger_stall"] = (
+                        episode["duration_ms"] is not None
+                        and episode["duration_ms"] > pause["duration_ms"])
+                pause["label"] = "Receiver-window stall"
+                evidence.append(
+                    f"{stall['advertisements']} zero-window advertisement(s) in or "
+                    f"immediately before this pause, from {stall['advertiser']}")
+                if episode is not None:
+                    evidence.append(
+                        f"Part of receiver-window stall #{episode['index']}: "
+                        f"{episode['probes']} probe(s) over "
+                        f"{_fmt_ms(episode['duration_ms'])}")
+                alternatives = [
+                    "Flow control is receiver-driven: the receiver had no buffer "
+                    "space. This is not congestion and not a network gap",
+                ]
+                pause["alternatives"] = alternatives
+                pause["window_stall"] = stall
+            phases.append(pause)
 
     return {"phases": phases, "thresholds": THRESHOLDS,
             "limitation": ("Phase boundaries follow a disclosed idle threshold and "

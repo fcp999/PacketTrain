@@ -179,7 +179,9 @@ def stream_detail(packets, stream):
              "sack_packets": sum(p["sack"] for p in group),
              "psh_packets": sum(p["psh"] for p in group)}
     tcp_detail = tcp_accounting(accounting_input)
-    phases = stream_phases(accounting_input)
+    # Computed before phases so a pause can point at the stall it belongs to.
+    window = receiver_window_analysis(group)
+    phases = stream_phases(accounting_input, window.get("episodes"))
     symptoms = transport_symptoms(accounting_input)
     fingerprints = fingerprint_endpoint(accounting_input,
                                         (summary["client"], summary["client_port"]))
@@ -191,7 +193,7 @@ def stream_detail(packets, stream):
             "packets": group, "facts": facts, "pattern": pattern,
             "rtt_distribution": build_rtt_distribution(group),
             "retransmissions": retransmission_analysis(group),
-            "receiver_window": receiver_window_analysis(group),
+            "receiver_window": window,
             "https": https, "slicing": slicing_report(group),
             "note": "Incoming timestamps are arrival times at the capture point. One-way time is estimated as RTT/2; choose the capture side manually if the handshake is ambiguous."}
 
