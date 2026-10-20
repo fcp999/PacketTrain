@@ -22,3 +22,14 @@ def test_empty():
 
 def test_limit_is_bounded():
     assert build_topology([], 999999)["shown_pairs"] == 0
+
+def test_native_pairs_to_graph_nodes():
+    from packettrain.topology import topology_from_pairs
+    result = topology_from_pairs([
+        {"source": "10.0.0.1", "target": "8.8.8.8",
+         "bytes": 120, "packets": 7, "streams": 1, "stream": 0, "ports": [443]}
+    ])
+    assert result["engine"] == "rust-sqlite"
+    assert result["shown_pairs"] == 1
+    assert len(result["nodes"]) == 2
+    assert {n["role"] for n in result["nodes"]} == {"internal", "external"}
