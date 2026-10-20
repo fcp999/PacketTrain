@@ -736,10 +736,7 @@ fn topology(index: &Path, limit: u32) -> Result<()> {
         "SELECT CASE WHEN left_addr < right_addr THEN left_addr ELSE right_addr END AS a,
                 CASE WHEN left_addr < right_addr THEN right_addr ELSE left_addr END AS b,
                 SUM(payload_bytes), SUM(packets), COUNT(*),
-                (SELECT f2.id FROM flows f2 WHERE
-                    (CASE WHEN f2.left_addr < f2.right_addr THEN f2.left_addr ELSE f2.right_addr END) = a
-                    AND (CASE WHEN f2.left_addr < f2.right_addr THEN f2.right_addr ELSE f2.left_addr END) = b
-                 ORDER BY f2.payload_bytes DESC, f2.id ASC LIMIT 1),
+                MIN(id),
                 MIN(CASE WHEN client_is_left=1 THEN right_port ELSE left_port END),
                 SUM(captured_bytes), SUM(CASE WHEN rst_seen=1 THEN 1 ELSE 0 END),
                 SUM(CASE WHEN syn_seen=1 THEN 1 ELSE 0 END),
