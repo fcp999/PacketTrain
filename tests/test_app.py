@@ -1354,6 +1354,10 @@ def test_capture_position_uses_ttl_as_primary_when_timing_conflicts():
 
 def test_bootstrap_uses_one_tshark_pass_for_stream_flow_and_payload(tmp_path, monkeypatch):
     monkeypatch.setattr(ptconfig, "PCAP_DIR", tmp_path)
+    # Exercise the non-indexed bootstrap path: this test checks one TShark
+    # pass, not the asynchronous index lifecycle.
+    from packettrain import indexing
+    monkeypatch.setattr(indexing, "supported", lambda path: False)
     (tmp_path / "sample.pcap").write_bytes(b"sample")
     lines = [
         row(1, 100.0, 3, 1, 0, {"tcp.flags.syn": "1"}),
