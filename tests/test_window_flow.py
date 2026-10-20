@@ -121,3 +121,54 @@ def test_sub_round_trip_zero_is_not_reported():
     packets = build([(1.0, 0, "out", None), (1.005, 500, "out", None)])
     result = window_flow.receiver_window_analysis(packets)
     assert result["episode_count"] == 0
+
+
+def test_separated_probes_are_one_episode_with_backoff():
+    """A stuck receiver probes on a widening backoff: one stall, not many.
+
+    Regression for the sourceforge shape, where seven advertisements spaced
+    0.3s to 9.2s apart are a single 36s stall. An earlier implementation opened
+    a new episode per probe and reported seven.
+    """
+    packets = build([
+        (1.0, 0, "out", None),
+        (1.3, 0, "out", None),
+        (1.9, 0, "out", None),
+        (3.1, 0, "out", None),
+        (5.4, 0, "out", None),
+        (10.0, 0, "out", None),
+        (19.2, 0, "out", None),
+        (37.0, 500, "out", None),   # window reopens
+    ])
+    result = window_flow.receiver_window_analysis(packets)
+    assert result["episode_count"] == 1
+    episode = result["episodes"][0]
+    assert episode["probes"] == 7
+    assert episode["recovered"] is True
+    assert episode["duration_ms"] == pytest.approx(36000.0, abs=1.0)
+    # Gaps widen: the receiver keeps finding no buffer space.
+    assert len(episode["probe_gaps_ms"]) == 6
+    assert episode["probe_gaps_ms"][-1] > episode["probe_gaps_ms"][0]
+    assert episode["probe_backoff"] is True
+
+
+def test_pauses_point_at_the_episode_they_belong_to():
+    """Several pauses inside one stall must not read as several stalls."""
+    from packettrain import phases
+    packets = build([
+        (1.0, 0, "out", None),
+        (3.0, 0, "out", None),
+        (8.0, 0, "out", None),
+        (20.0, 500, "out", None),
+    ])
+    for index, packet in enumerate(packets):
+        packet["time_ms"] = (packet["ts"] - packets[0]["ts"]) * 1000.0
+        packet["frame"] = index + 1
+    window = window_flow.receiver_window_analysis(packets)
+    assert window["episode_count"] == 1
+    table = phases.stream_phases(packets, window["episodes"])
+    stalls = [p for p in table["phases"] if p.get("window_stall")]
+    assert stalls, "expected at least one stall-labelled pause"
+    for pause in stalls:
+        assert pause["window_stall"]["episode_index"] == 0
+        assert pause["window_stall"]["episode_probes"] == 3
