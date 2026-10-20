@@ -37,7 +37,100 @@ def _activity(packets):
     return runs
 
 
-def _classify_run(run):
+def _zero_window_probe(run, packets, peer_acks=None):
+    """Recognise a run that carries a receiver window probe, or None.
+
+    A TCP window probe is a zero-length segment that re-sends one byte below the
+    point the peer has acknowledged for that sender's stream. It exists to
+    provoke a window update from a receiver whose advertised window is closed,
+    which is why it looks like a retransmission of already-acknowledged data
+    that happens to carry no payload.
+
+    Two sequence numbers must not be confused here. A segment's own ``seq`` and
+    the ``ack`` field it carries belong to *different* streams: the ack refers to
+    the peer's direction, not the sender's. A probe is therefore detected by
+    comparing the sender's seq against the ack the *peer* most recently sent for
+    that direction (``peer_acks``), never against the ack in the same packet.
+
+    Detection requires both halves of the pattern:
+      * a zero-length segment whose seq is one below the peer's ack for its own
+        direction, and
+      * a closed window advertised by that peer, in this run or immediately
+        before it.
+    Requiring the closed window keeps an ordinary stale zero-length ACK from
+    being called a probe.
+    """
+    peer_acks = peer_acks or {}
+
+    def acknowledged_for(packet):
+        """Most recent ack the peer sent for this sender's direction.
+
+        The peer sends from the reverse endpoint pair, so the lookup key is
+        mirrored: the packet's destination becomes the ack's source.
+        """
+        key = (packet.get("dst"), packet.get("dport"),
+               packet.get("src"), packet.get("sport"))
+        return _ack_at(peer_acks, key, packet.get("time_ms"))
+
+    probing = []
+    for packet in packets:
+        if not packet.get("ack_flag") or packet.get("length", 0) != 0:
+            continue
+        acked = acknowledged_for(packet)
+        if acked is None:
+            continue
+        if _behind(packet.get("seq"), acked):
+            probing.append(packet)
+    if not probing:
+        return None
+
+    # The probe only makes sense against a closed window: look in this run, then
+    # in the packets immediately preceding it.
+    closed = [p for p in packets
+              if p.get("window_present") and p.get("window") == 0]
+    window_source = "this phase"
+    if not closed:
+        lookback = run.get("lookback", [])
+        closed = [p for p in lookback
+                  if p.get("window_present") and p.get("window") == 0]
+        window_source = "the preceding segment"
+    if not closed:
+        return None
+
+    evidence = [
+        f"{len(probing)} zero-length segment(s) re-sending the byte before the "
+        "peer's acknowledge point",
+        f"peer advertised a closed window in {window_source}",
+    ]
+    advertiser = closed[0].get("src")
+    if advertiser:
+        evidence.append(f"closed window advertised by {advertiser}")
+    return {
+        "label": "Zero Window Probe",
+        "evidence": evidence,
+        "alternatives": [
+            "A closed window means the receiver had no buffer space; the probe "
+            "is the sender checking whether that changed",
+        ],
+        "probe_frames": [p["frame"] for p in probing],
+        "window_frames": [p["frame"] for p in closed[:20]],
+    }
+
+
+def _behind(seq, ack):
+    """True when ``seq`` sits at or just below ``ack`` in 32-bit sequence space.
+
+    A window probe re-sends the single byte immediately preceding the point the
+    peer has acknowledged, so the offset is 0 or 1. Larger offsets are ordinary
+    in-flight data, not a probe.
+    """
+    if seq is None or ack is None:
+        return False
+    offset = (ack - seq) % (1 << 32)
+    return offset in (0, 1)
+
+
+def _classify_run(run, peer_acks=None):
     """Label one activity run from its own payload shape."""
     packets = run["packets"]
     payload = [p for p in packets if p["length"] > 0]
@@ -47,13 +140,18 @@ def _classify_run(run):
     span_s = (run["end"] - run["start"]) / 1000.0
 
     if not payload:
-        # Control traffic only. Distinguish a setup opener from a teardown.
+        # Control traffic only. Distinguish a setup opener from a teardown, and
+        # recognise window probes, which are otherwise indistinguishable from
+        # any other payload-free segment.
         if any(p["syn"] and not p["ack_flag"] for p in packets):
             return {"label": "Setup", "evidence": ["SYN with no payload"],
                     "alternatives": []}
         if any(p["fin"] or p["rst"] for p in packets):
             return {"label": "Teardown", "evidence": ["FIN or RST with no payload"],
                     "alternatives": []}
+        probe = _zero_window_probe(run, packets, peer_acks)
+        if probe is not None:
+            return probe
         return {"label": "Control exchange", "evidence": ["No payload observed"],
                 "alternatives": []}
 
@@ -134,6 +232,36 @@ def _window_stall(ordered, pause_start, pause_end):
     }
 
 
+def _peer_ack_index(ordered):
+    """Ack each endpoint sent for each peer direction, in time order.
+
+    Keyed by the sender of the ack: (src, sport, dst, dport) -> [(time_ms, ack)].
+    Callers take the latest entry at or before the packet being tested. Using
+    the capture-wide final ack would compare a probe against a sequence value
+    the peer had not yet issued.
+    """
+    index = {}
+    for packet in ordered:
+        if not packet.get("ack_flag"):
+            continue
+        key = (packet.get("src"), packet.get("sport"),
+               packet.get("dst"), packet.get("dport"))
+        index.setdefault(key, []).append((packet.get("time_ms"), packet.get("ack")))
+    return index
+
+
+def _ack_at(index, key, time_ms):
+    """Latest ack sent for ``key`` at or before ``time_ms``."""
+    entries = index.get(key)
+    if not entries:
+        return None
+    latest = None
+    for when, ack in entries:
+        if when is None or time_ms is None or when <= time_ms:
+            latest = ack
+    return latest
+
+
 def _fmt_ms(value):
     """Human-readable duration for evidence text."""
     if value is None:
@@ -174,11 +302,18 @@ def stream_phases(packets, window_episodes=None):
 
     phases = []
     runs = _activity(ordered)
+    # Most recent ack sent by each endpoint for the peer's direction. A window
+    # probe is recognised by comparing its seq against this, not against the ack
+    # in the same packet, which belongs to the opposite stream.
+    peer_acks = _peer_ack_index(ordered)
+    for index, run in enumerate(runs):
+        if index > 0:
+            run["lookback"] = runs[index - 1]["packets"][-4:]
 
     # A pause is the quiet interval between runs, reported explicitly rather
     # than hidden: the spec distinguishes a payload pause from a teardown.
     for index, run in enumerate(runs):
-        verdict = _classify_run(run)
+        verdict = _classify_run(run, peer_acks)
         phase = {
             "index": len(phases),
             "label": verdict["label"],
