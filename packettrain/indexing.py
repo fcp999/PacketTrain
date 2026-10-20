@@ -245,3 +245,27 @@ def extracted_flow(path, flow_id):
             output.unlink()
         with contextlib.suppress(OSError):
             output.with_suffix(".part").unlink()
+
+
+def topology_pairs(path, limit=25):
+    """Ask the Rust indexer's SQLite reader for a bounded, aggregated pair list."""
+    if not is_ready(path):
+        raise FileNotFoundError("Flow index is not ready")
+    limit = int(limit)
+    if not 1 <= limit <= 500:
+        raise ValueError("Topology limit must be 1..500")
+    result = subprocess.run(
+        [str(INDEX_BINARY), "topology", "--index", str(paths(path)["dir"]),
+         "--limit", str(limit)],
+        capture_output=True, text=True, timeout=60, check=True,
+    )
+    output = []
+    for line in result.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 7:
+            raise ValueError("Malformed native topology output")
+        a, b, nbytes, packets, streams, stream, port = parts
+        output.append({"source": a, "target": b, "bytes": int(nbytes),
+                       "packets": int(packets), "streams": int(streams),
+                       "stream": int(stream), "ports": [int(port)]})
+    return output
