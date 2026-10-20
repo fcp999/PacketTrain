@@ -59,7 +59,7 @@ def topology_data():
     """Bounded, indexed TCP host-pair overview; no full capture decode."""
     path = capture_path(request.args.get("file", ""))
     raw = request.args.get("limit", "25")
-    if not re.fullmatch(r"\\d{1,3}", raw) or not 1 <= int(raw) <= 500:
+    if not re.fullmatch(r"\d{1,3}", raw) or not 1 <= int(raw) <= 500:
         abort(400, "Invalid topology limit")
     if not indexing.supported(path):
         abort(422, "Topology currently requires an indexed Ethernet .pcap")
