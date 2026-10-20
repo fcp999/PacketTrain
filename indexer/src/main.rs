@@ -696,6 +696,18 @@ mod tests {
         Ok(n)
     }
     #[test]
+    fn zero_window_requires_ack_and_excludes_syn() {
+        let a = [192, 0, 2, 1];
+        let b = [198, 51, 100, 2];
+        let mut ack = tcp_packet(a, b, 40000, 443, 0x10, &[]);
+        assert!(parse_tcp(&ack, 1).unwrap().zero_window);
+        ack[14 + 20 + 14..14 + 20 + 16].copy_from_slice(&2048u16.to_be_bytes());
+        assert!(!parse_tcp(&ack, 1).unwrap().zero_window);
+        let synack = tcp_packet(a, b, 40000, 443, 0x12, &[]);
+        assert!(!parse_tcp(&synack, 1).unwrap().zero_window);
+    }
+
+    #[test]
     fn indexes_tuple_reuse_and_extracts_exact_membership() -> Result<()> {
         let root = env::temp_dir().join(format!(
             "packettrain-index-test-{}-{}",
