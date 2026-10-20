@@ -10,6 +10,7 @@ from .position import position_evidence
 from .accounting_tcp import tcp_accounting
 from .fingerprint import fingerprint_endpoint
 from .phases import stream_phases, transport_symptoms
+from .window_flow import receiver_window_analysis
 
 
 # A rate sample needs enough packets that one scheduling hiccup
@@ -186,6 +187,7 @@ def stream_detail(packets, stream):
             "fingerprint": fingerprints,
             "handshake_legs_ms": [round(leg1, 3), round(leg2, 3)] if leg1 is not None and leg2 is not None else None,
             "packets": group, "facts": facts, "pattern": pattern,
+            "receiver_window": receiver_window_analysis(group),
             "https": https, "slicing": slicing_report(group),
             "note": "Incoming timestamps are arrival times at the capture point. One-way time is estimated as RTT/2; choose the capture side manually if the handshake is ambiguous."}
 
