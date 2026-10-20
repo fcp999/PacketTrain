@@ -721,8 +721,42 @@ mod tests {
     }
 }
 
+
+fn topology(index: &Path, limit: u32) -> Result<()> {
+    if !index.join("READY").is_file() {
+        bail!("index is incomplete");
+    }
+    let db = Connection::open_with_flags(
+        index.join("capture.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    // Group in SQLite, return only bounded aggregate rows, never every flow.
+    // Output fields are tab-delimited; IP literals cannot contain tabs.
+    let mut stmt = db.prepare(
+        "SELECT CASE WHEN left_addr < right_addr THEN left_addr ELSE right_addr END AS a,
+                CASE WHEN left_addr < right_addr THEN right_addr ELSE left_addr END AS b,
+                SUM(payload_bytes), SUM(packets), COUNT(*), MIN(id), MIN(
+                    CASE WHEN client_is_left=1 THEN right_port ELSE left_port END)
+         FROM flows GROUP BY a,b ORDER BY SUM(payload_bytes) DESC, SUM(packets) DESC
+         LIMIT ?1",
+    )?;
+    let rows = stmt.query_map([limit], |row| {
+        Ok((
+            row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?, row.get::<_, i64>(3)?,
+            row.get::<_, i64>(4)?, row.get::<_, i64>(5)?,
+            row.get::<_, i64>(6)?,
+        ))
+    })?;
+    for row in rows {
+        let (a,b,bytes,packets,flows,stream,port) = row?;
+        println!("{a}\t{b}\t{bytes}\t{packets}\t{flows}\t{stream}\t{port}");
+    }
+    Ok(())
+}
+
 fn usage() -> ! {
-    eprintln!("usage:\n  packettrain-index scan <capture.pcap> --output <index-dir>\n  packettrain-index extract --index <index-dir> --flow <id> --output <flow.pcap>");
+    eprintln!("usage:\n  packettrain-index scan <capture.pcap> --output <index-dir>\n  packettrain-index extract --index <index-dir> --flow <id> --output <flow.pcap>\n  packettrain-index topology --index <index-dir> --limit <1..500>");
     std::process::exit(2)
 }
 fn option(args: &[String], name: &str) -> Option<String> {
@@ -748,6 +782,12 @@ fn main() -> Result<()> {
             let flow: u32 = option(&args, "--flow").unwrap_or_else(|| usage()).parse()?;
             let out = option(&args, "--output").unwrap_or_else(|| usage());
             extract(Path::new(&idx), flow, Path::new(&out))
+        }
+        "topology" => {
+            let idx = option(&args, "--index").unwrap_or_else(|| usage());
+            let limit: u32 = option(&args, "--limit").unwrap_or_else(|| "25".into()).parse()?;
+            if !(1..=500).contains(&limit) { bail!("topology limit must be 1..500"); }
+            topology(Path::new(&idx), limit)
         }
         _ => usage(),
     }
