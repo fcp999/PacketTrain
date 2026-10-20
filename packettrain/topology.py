@@ -48,3 +48,34 @@ def build_topology(streams, limit=100):
              for (a, b), d in selected]
     return {"nodes": nodes, "edges": links, "total_pairs": len(edges),
             "shown_pairs": len(links), "metric": "TCP payload bytes"}
+
+
+def topology_from_pairs(edges):
+    """Construct browser-friendly visible nodes from native bounded edges."""
+    from collections import defaultdict
+    import ipaddress
+
+    hosts = defaultdict(lambda: {"bytes": 0, "packets": 0, "peers": set()})
+    for edge in edges:
+        a, b = edge["source"], edge["target"]
+        for x, y in ((a, b), (b, a)):
+            hosts[x]["bytes"] += edge["bytes"]
+            hosts[x]["packets"] += edge["packets"]
+            hosts[x]["peers"].add(y)
+    nodes = []
+    for address, item in hosts.items():
+        try:
+            ip = ipaddress.ip_address(address)
+            role = "internal" if ip.is_private else "external"
+            if ip.is_multicast:
+                role = "multicast"
+            elif ip.is_loopback:
+                role = "loopback"
+        except ValueError:
+            role = "unknown"
+        nodes.append({"id": address, "role": role, "bytes": item["bytes"],
+                      "packets": item["packets"], "peers": len(item["peers"])})
+    nodes.sort(key=lambda n: (-n["bytes"], n["id"]))
+    return {"nodes": nodes, "edges": edges, "total_pairs": None,
+            "shown_pairs": len(edges), "metric": "TCP payload bytes",
+            "engine": "rust-sqlite"}
