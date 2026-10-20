@@ -13,7 +13,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY --from=indexer-build /src/target/release/packettrain-index /usr/local/bin/packettrain-index
-COPY app.py index.html ./
+COPY app.py index.html topology.html ./
 COPY packettrain ./packettrain
 RUN useradd --uid 10001 --create-home packettrain && mkdir /cache && chown packettrain:packettrain /cache
 USER packettrain

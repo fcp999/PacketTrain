@@ -16,7 +16,7 @@ from pathlib import Path
 INDEX_DIR = Path(os.environ.get("PACKETTRAIN_INDEX_DIR", "/cache")).resolve()
 INDEX_BINARY = Path(os.environ.get("PACKETTRAIN_INDEX_BINARY", "/usr/local/bin/packettrain-index"))
 INDEX_TIMEOUT = int(os.environ.get("PACKETTRAIN_INDEX_TIMEOUT", "900"))
-INDEX_SCHEMA_VERSION = "2"
+INDEX_SCHEMA_VERSION = "3"
 REF_SIZE = 32
 NO_REF = (1 << 64) - 1
 _PROGRESS = re.compile(r"indexed frame=(\d+) flows=(\d+) elapsed=([0-9.]+)s")
@@ -245,3 +245,31 @@ def extracted_flow(path, flow_id):
             output.unlink()
         with contextlib.suppress(OSError):
             output.with_suffix(".part").unlink()
+
+
+def topology_pairs(path, limit=25):
+    """Ask the Rust indexer's SQLite reader for a bounded, aggregated pair list."""
+    if not is_ready(path):
+        raise FileNotFoundError("Flow index is not ready")
+    limit = int(limit)
+    if not 1 <= limit <= 500:
+        raise ValueError("Topology limit must be 1..500")
+    result = subprocess.run(
+        [str(INDEX_BINARY), "topology", "--index", str(paths(path)["dir"]),
+         "--limit", str(limit)],
+        capture_output=True, text=True, timeout=60, check=True,
+    )
+    output = []
+    for line in result.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 14:
+            raise ValueError("Malformed native topology output")
+        a, b, nbytes, packets, streams, stream, port, captured, resets, syns, closed, first, last, zeros = parts
+        output.append({"source": a, "target": b, "bytes": int(nbytes),
+                       "packets": int(packets), "streams": int(streams),
+                       "stream": int(stream), "ports": [int(port)],
+                       "captured_bytes": int(captured), "resets": int(resets),
+                       "syn_flows": int(syns), "closed_flows": int(closed),
+                       "duration_ms": max(0, (int(last) - int(first)) / 1e6),
+                       "zero_window_events": int(zeros)})
+    return output

@@ -68,6 +68,7 @@ struct ParsedPacket {
     src_is_left: bool,
     flags: u8,
     payload: u32,
+    zero_window: bool,
 }
 
 #[derive(Debug)]
@@ -88,6 +89,7 @@ struct Flow {
     syn_seen: bool,
     fin_mask: u8,
     rst_seen: bool,
+    zero_window_events: u64,
     closed: bool,
     first_ref: u64,
     last_ref: u64,
@@ -228,6 +230,7 @@ fn parse_tcp(packet: &[u8], linktype: u32) -> Option<ParsedPacket> {
             src_is_left: false,
             flags: 0,
             payload: 0,
+            zero_window: false,
         });
     }
     if packet.len() < tcp_off + 20 {
@@ -236,7 +239,7 @@ fn parse_tcp(packet: &[u8], linktype: u32) -> Option<ParsedPacket> {
     let sport = u16::from_be_bytes(packet[tcp_off..tcp_off + 2].try_into().ok()?);
     let dport = u16::from_be_bytes(packet[tcp_off + 2..tcp_off + 4].try_into().ok()?);
     let data_off = ((packet[tcp_off + 12] >> 4) as usize) * 4;
-    if data_off < 20 {
+    if data_off < 20 || packet.len() < tcp_off + data_off || declared_end < tcp_off + data_off {
         return None;
     }
     let (key, src_is_left) = canonical(family, src, sport, dst, dport);
@@ -247,6 +250,9 @@ fn parse_tcp(packet: &[u8], linktype: u32) -> Option<ParsedPacket> {
         src_is_left,
         flags: packet[tcp_off + 13],
         payload: declared_end.saturating_sub(tcp_off + data_off) as u32,
+        zero_window: u16::from_be_bytes(packet[tcp_off+14..tcp_off+16].try_into().ok()?) == 0
+            && (packet[tcp_off+13] & 0x10 != 0)
+            && (packet[tcp_off+13] & 0x02 == 0),
     })
 }
 
@@ -363,6 +369,7 @@ fn scan(source: &Path, out: &Path) -> Result<()> {
                     syn_seen: false,
                     fin_mask: 0,
                     rst_seen: false,
+                    zero_window_events: 0,
                     closed: false,
                     first_ref: NO_REF,
                     last_ref: NO_REF,
@@ -400,6 +407,7 @@ fn scan(source: &Path, out: &Path) -> Result<()> {
                 flow.fin_mask |= if parsed.src_is_left { 1 } else { 2 };
             }
             flow.rst_seen |= rst;
+            flow.zero_window_events += u64::from(parsed.zero_window);
             flow.closed |= rst || flow.fin_mask == 3;
         }
         let idx = ref_count;
@@ -438,7 +446,7 @@ fn scan(source: &Path, out: &Path) -> Result<()> {
        first_frame INTEGER NOT NULL,last_frame INTEGER NOT NULL,first_ts_ns INTEGER NOT NULL,last_ts_ns INTEGER NOT NULL,
        packets INTEGER NOT NULL,captured_bytes INTEGER NOT NULL,payload_bytes INTEGER NOT NULL,
        left_payload_bytes INTEGER NOT NULL,right_payload_bytes INTEGER NOT NULL,client_is_left INTEGER NOT NULL,
-       syn_seen INTEGER NOT NULL,fin_mask INTEGER NOT NULL,rst_seen INTEGER NOT NULL,closed INTEGER NOT NULL,first_ref INTEGER NOT NULL,last_ref INTEGER NOT NULL,
+       syn_seen INTEGER NOT NULL,fin_mask INTEGER NOT NULL,rst_seen INTEGER NOT NULL,zero_window_events INTEGER NOT NULL,closed INTEGER NOT NULL,first_ref INTEGER NOT NULL,last_ref INTEGER NOT NULL,
        analysis_state TEXT NOT NULL DEFAULT 'pending');")?;
     let meta = fs::metadata(source)?;
     let mtime = meta.modified()?.duration_since(UNIX_EPOCH)?.as_nanos();
@@ -475,7 +483,7 @@ fn scan(source: &Path, out: &Path) -> Result<()> {
             )?;
         }
         {
-            let mut st=tx.prepare("INSERT INTO flows(id,generation,family,left_addr,left_port,right_addr,right_port,first_frame,last_frame,first_ts_ns,last_ts_ns,packets,captured_bytes,payload_bytes,left_payload_bytes,right_payload_bytes,client_is_left,syn_seen,fin_mask,rst_seen,closed,first_ref,last_ref) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)")?;
+            let mut st=tx.prepare("INSERT INTO flows(id,generation,family,left_addr,left_port,right_addr,right_port,first_frame,last_frame,first_ts_ns,last_ts_ns,packets,captured_bytes,payload_bytes,left_payload_bytes,right_payload_bytes,client_is_left,syn_seen,fin_mask,rst_seen,zero_window_events,closed,first_ref,last_ref) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)")?;
             for f in &flows {
                 st.execute(params![
                     f.id,
@@ -498,6 +506,7 @@ fn scan(source: &Path, out: &Path) -> Result<()> {
                     f.syn_seen as u8,
                     f.fin_mask,
                     f.rst_seen as u8,
+                    f.zero_window_events,
                     f.closed as u8,
                     f.first_ref,
                     f.last_ref
@@ -687,6 +696,18 @@ mod tests {
         Ok(n)
     }
     #[test]
+    fn zero_window_requires_ack_and_excludes_syn() {
+        let a = [192, 0, 2, 1];
+        let b = [198, 51, 100, 2];
+        let mut ack = tcp_packet(a, b, 40000, 443, 0x10, &[]);
+        assert!(parse_tcp(&ack, 1).unwrap().zero_window);
+        ack[14 + 20 + 14..14 + 20 + 16].copy_from_slice(&2048u16.to_be_bytes());
+        assert!(!parse_tcp(&ack, 1).unwrap().zero_window);
+        let synack = tcp_packet(a, b, 40000, 443, 0x12, &[]);
+        assert!(!parse_tcp(&synack, 1).unwrap().zero_window);
+    }
+
+    #[test]
     fn indexes_tuple_reuse_and_extracts_exact_membership() -> Result<()> {
         let root = env::temp_dir().join(format!(
             "packettrain-index-test-{}-{}",
@@ -721,8 +742,50 @@ mod tests {
     }
 }
 
+
+fn topology(index: &Path, limit: u32) -> Result<()> {
+    if !index.join("READY").is_file() {
+        bail!("index is incomplete");
+    }
+    let db = Connection::open_with_flags(
+        index.join("capture.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    // Group in SQLite, return only bounded aggregate rows, never every flow.
+    // Output fields are tab-delimited; IP literals cannot contain tabs.
+    let mut stmt = db.prepare(
+        "SELECT CASE WHEN left_addr < right_addr THEN left_addr ELSE right_addr END AS a,
+                CASE WHEN left_addr < right_addr THEN right_addr ELSE left_addr END AS b,
+                SUM(payload_bytes), SUM(packets), COUNT(*),
+                MIN(id),
+                MIN(CASE WHEN client_is_left=1 THEN right_port ELSE left_port END),
+                SUM(captured_bytes), SUM(CASE WHEN rst_seen=1 THEN 1 ELSE 0 END),
+                SUM(CASE WHEN syn_seen=1 THEN 1 ELSE 0 END),
+                SUM(CASE WHEN closed=1 THEN 1 ELSE 0 END),
+                MIN(first_ts_ns), MAX(last_ts_ns), SUM(zero_window_events)
+         FROM flows GROUP BY a,b ORDER BY SUM(payload_bytes) DESC, SUM(packets) DESC
+         LIMIT ?1",
+    )?;
+    let rows = stmt.query_map([limit], |row| {
+        Ok((
+            row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?, row.get::<_, i64>(3)?,
+            row.get::<_, i64>(4)?, row.get::<_, i64>(5)?,
+            row.get::<_, i64>(6)?, row.get::<_, i64>(7)?,
+            row.get::<_, i64>(8)?, row.get::<_, i64>(9)?,
+            row.get::<_, i64>(10)?, row.get::<_, i64>(11)?,
+            row.get::<_, i64>(12)?, row.get::<_, i64>(13)?,
+        ))
+    })?;
+    for row in rows {
+        let (a,b,bytes,packets,flows,stream,port,wire,rsts,syns,closed,first,last,zeros) = row?;
+        println!("{a}\t{b}\t{bytes}\t{packets}\t{flows}\t{stream}\t{port}\t{wire}\t{rsts}\t{syns}\t{closed}\t{first}\t{last}\t{zeros}");
+    }
+    Ok(())
+}
+
 fn usage() -> ! {
-    eprintln!("usage:\n  packettrain-index scan <capture.pcap> --output <index-dir>\n  packettrain-index extract --index <index-dir> --flow <id> --output <flow.pcap>");
+    eprintln!("usage:\n  packettrain-index scan <capture.pcap> --output <index-dir>\n  packettrain-index extract --index <index-dir> --flow <id> --output <flow.pcap>\n  packettrain-index topology --index <index-dir> --limit <1..500>");
     std::process::exit(2)
 }
 fn option(args: &[String], name: &str) -> Option<String> {
@@ -748,6 +811,12 @@ fn main() -> Result<()> {
             let flow: u32 = option(&args, "--flow").unwrap_or_else(|| usage()).parse()?;
             let out = option(&args, "--output").unwrap_or_else(|| usage());
             extract(Path::new(&idx), flow, Path::new(&out))
+        }
+        "topology" => {
+            let idx = option(&args, "--index").unwrap_or_else(|| usage());
+            let limit: u32 = option(&args, "--limit").unwrap_or_else(|| "25".into()).parse()?;
+            if !(1..=500).contains(&limit) { bail!("topology limit must be 1..500"); }
+            topology(Path::new(&idx), limit)
         }
         _ => usage(),
     }
