@@ -23,6 +23,7 @@ from packettrain.payload import (CONVERSATION_PREVIEW_BYTES, MAX_CONVERSATION_PA
 from packettrain.accounting_tcp import tcp_accounting
 from packettrain.position import infer_capture_side, position_evidence
 from packettrain import accounting_tcp, fingerprint, idle, phases, indexing
+from packettrain.topology import build_topology
 
 # Re-exported so callers that imported these from the app module keep working.
 # The package modules are the real owners; this is a compatibility surface.
@@ -45,6 +46,27 @@ def index():
 def static_assets(name):
     """Serve vendored front-end assets. Only static/ is reachable."""
     return send_from_directory(ROOT / "packettrain" / "static", name)
+
+
+
+@app.get("/topology")
+def topology_page():
+    return send_from_directory(ROOT, "topology.html")
+
+
+@app.get("/api/topology")
+def topology_data():
+    """Bounded, indexed TCP host-pair overview; no full capture decode."""
+    path = capture_path(request.args.get("file", ""))
+    raw = request.args.get("limit", "25")
+    if not re.fullmatch(r"\\d{1,3}", raw) or not 1 <= int(raw) <= 500:
+        abort(400, "Invalid topology limit")
+    if not indexing.supported(path):
+        abort(422, "Topology currently requires an indexed Ethernet .pcap")
+    state = indexing.request_index(path)
+    if state["state"] != "ready":
+        return jsonify(state), (202 if state["state"] == "indexing" else 422)
+    return jsonify(build_topology(indexing.stream_summaries(path), int(raw)))
 
 
 @app.get("/api/conversation-payload")
