@@ -33,3 +33,15 @@ def test_native_pairs_to_graph_nodes():
     assert result["shown_pairs"] == 1
     assert len(result["nodes"]) == 2
     assert {n["role"] for n in result["nodes"]} == {"internal", "external"}
+
+def test_native_stats_are_preserved():
+    from packettrain.topology import topology_from_pairs
+    edge = {"source": "192.0.2.10", "target": "198.51.100.2",
+            "bytes": 400, "captured_bytes": 900, "packets": 5,
+            "streams": 2, "stream": 1, "ports": [443],
+            "resets": 1, "syn_flows": 2, "closed_flows": 1,
+            "duration_ms": 250}
+    result = topology_from_pairs([edge])
+    assert result["edges"][0]["resets"] == 1
+    assert result["edges"][0]["closed_flows"] == 1
+    assert result["edges"][0]["captured_bytes"] == 900
