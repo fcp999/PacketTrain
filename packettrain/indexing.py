@@ -262,10 +262,13 @@ def topology_pairs(path, limit=25):
     output = []
     for line in result.stdout.splitlines():
         parts = line.split("\t")
-        if len(parts) != 7:
+        if len(parts) != 13:
             raise ValueError("Malformed native topology output")
-        a, b, nbytes, packets, streams, stream, port = parts
+        a, b, nbytes, packets, streams, stream, port, captured, resets, syns, closed, first, last = parts
         output.append({"source": a, "target": b, "bytes": int(nbytes),
                        "packets": int(packets), "streams": int(streams),
-                       "stream": int(stream), "ports": [int(port)]})
+                       "stream": int(stream), "ports": [int(port)],
+                       "captured_bytes": int(captured), "resets": int(resets),
+                       "syn_flows": int(syns), "closed_flows": int(closed),
+                       "duration_ms": max(0, (int(last) - int(first)) / 1e6)})
     return output
