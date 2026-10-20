@@ -12,6 +12,7 @@ from .fingerprint import fingerprint_endpoint
 from .phases import stream_phases, transport_symptoms
 from .retransmit import retransmission_analysis
 from .rtt import rtt_distribution as build_rtt_distribution
+from .window_flow import receiver_window_analysis
 
 
 # A rate sample needs enough packets that one scheduling hiccup
@@ -190,6 +191,7 @@ def stream_detail(packets, stream):
             "packets": group, "facts": facts, "pattern": pattern,
             "rtt_distribution": build_rtt_distribution(group),
             "retransmissions": retransmission_analysis(group),
+            "receiver_window": receiver_window_analysis(group),
             "https": https, "slicing": slicing_report(group),
             "note": "Incoming timestamps are arrival times at the capture point. One-way time is estimated as RTT/2; choose the capture side manually if the handshake is ambiguous."}
 
