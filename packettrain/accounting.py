@@ -10,6 +10,7 @@ from .position import position_evidence
 from .accounting_tcp import tcp_accounting
 from .fingerprint import fingerprint_endpoint
 from .phases import stream_phases, transport_symptoms
+from .retransmit import retransmission_analysis
 from .rtt import rtt_distribution as build_rtt_distribution
 
 
@@ -188,6 +189,7 @@ def stream_detail(packets, stream):
             "handshake_legs_ms": [round(leg1, 3), round(leg2, 3)] if leg1 is not None and leg2 is not None else None,
             "packets": group, "facts": facts, "pattern": pattern,
             "rtt_distribution": build_rtt_distribution(group),
+            "retransmissions": retransmission_analysis(group),
             "https": https, "slicing": slicing_report(group),
             "note": "Incoming timestamps are arrival times at the capture point. One-way time is estimated as RTT/2; choose the capture side manually if the handshake is ambiguous."}
 
