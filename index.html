@@ -176,7 +176,7 @@ function marker(p,aggregate){if(p.syn)return p.ack_flag?'SYN+ACK':'SYN';if(p.rst
 function showPattern(pattern){$('patternCard').hidden=!pattern;if(!pattern)return;$('patternTitle').textContent=pattern.label;$('patternConfidence').textContent=`${pattern.confidence} confidence · traffic pattern`;$('patternScope').textContent=pattern.scope;$('patternEvidence').replaceChildren();for(const item of pattern.evidence){let li=document.createElement('li');li.textContent=item;$('patternEvidence').append(li)}}
 const PLOT_LAYOUT={paper_bgcolor:'#11212c',plot_bgcolor:'#11212c',font:{color:'#a9c0ca',size:11},margin:{l:52,r:14,t:8,b:34},xaxis:{gridcolor:'#29404c',zeroline:false},yaxis:{gridcolor:'#29404c',zeroline:false},showlegend:true,legend:{orientation:'h',y:-0.22,font:{size:10}}};
 const PLOT_CONFIG={displayModeBar:true,displaylogo:false,responsive:true,scrollZoom:true,doubleClick:'autosize',modeBarButtons:[['pan2d','zoom2d'],['zoomIn2d','zoomOut2d','autoScale2d'],['toImage']]};
-function plot(div,traces,layout){if(!window.Plotly)return;Plotly.react(div,traces,Object.assign({},PLOT_LAYOUT,layout||{}),PLOT_CONFIG);}
+function plot(div,traces,layout){if(!window.Plotly)return;return Plotly.react(div,traces,Object.assign({},PLOT_LAYOUT,layout||{}),PLOT_CONFIG);}
 function clearPayload(){$('payloadCard').hidden=true;payloadState={frame:null,data:null,view:payloadState.view,loading:false,request:payloadState.request+1};$('payloadPre').textContent='No payload available.';$('payloadNote').innerHTML='';$('payloadMeta').textContent='Select a conversation.';$('loadFullPayload').hidden=true;}
 function clearGraphs(){for(const id of ['gWindow','gOutstanding','gThroughput','gSizes','gTsg','gTput','gRtt']){let el=$(id);if(el&&window.Plotly)Plotly.purge(el);}}
 function renderGraphs(){const has=flow&&flow.accounting;$('graphsCard').hidden=!has;if(!has)return;if(!window.Plotly){$('graphsHint').textContent='Plotly bundle failed to load; graphs unavailable.';return;}
@@ -198,30 +198,115 @@ function renderGraphs(){const has=flow&&flow.accounting;$('graphsCard').hidden=!
  // 4. Payload record sizes, one marker per record.
  const sized=packets.filter(p=>p.length>0);
  plot('gSizes',[{x:tt,y:packets.map(p=>p.length),name:'record size',mode:'markers',marker:{color:'#91baf0',size:4}}],{xaxis:{title:{text:'ms'}},yaxis:{title:{text:'bytes'}}});
- // ---- tcptrace-ng-style time sequence and throughput ----------------------
- const SEQ_SPACE=4294967296,SEQ_HALF=2147483648;
- const seqBase=new Map();for(const dir of ['out','in']){const first=packets.find(p=>p.direction===dir);seqBase.set(dir,first?first.seq:null)}
- function seqDelta(value,base){if(value==null||base==null)return null;let d=(value-base)%SEQ_SPACE;if(d>=SEQ_HALF)d-=SEQ_SPACE;if(d< -SEQ_HALF)d+=SEQ_SPACE;return d}
- function seqOf(p,dir=p.direction){return seqDelta(p.seq,seqBase.get(dir))}
- function ackOf(p,dataDir){return p.ack_flag?seqDelta(p.ack,seqBase.get(dataDir)):null}
- const scaledWindow=new Map(w.history.filter(pt=>pt.scaled!=null).map(pt=>[pt.direction+'|'+pt.time_ms,pt.scaled]));
- function dataBars(dir,color,label,retrans,xaxis,yaxis,showlegend){const x=[],y=[];for(const p of packets){if(p.direction!==dir||p.length<=0||Boolean(p.retrans)!==retrans)continue;const q=seqOf(p,dir);if(q==null)continue;x.push(p.time_ms,p.time_ms,null);y.push(q,q+p.length,null)}return{x,y,name:label,legendgroup:label,showlegend,mode:'lines',line:{color,width:retrans?2.4:1.35},connectgaps:false,hovertemplate:label+'<br>%{x:.3f} ms<br>seq %{y:,.0f}<extra></extra>',xaxis,yaxis}}
- function ackPoints(dataDir){const reverse=dataDir==='out'?'in':'out',out=[];for(const p of packets){if(p.direction!==reverse)continue;const q=ackOf(p,dataDir);if(q!=null)out.push([p.time_ms,q])}return out}
- function ackTrace(dir,xaxis,yaxis,showlegend){const pts=ackPoints(dir);return{x:pts.map(p=>p[0]),y:pts.map(p=>p[1]),name:'cumulative ACK',legendgroup:'ack',showlegend,mode:'lines',line:{color:'#65d88a',width:1.5,shape:'hv'},xaxis,yaxis,hovertemplate:'ACK %{y:,.0f}<br>%{x:.3f} ms<extra></extra>'}}
- function inFlightTrace(dir,xaxis,yaxis,showlegend){const pts=o.series.filter(p=>p.direction===dir);return{x:pts.map(p=>p.time_ms),y:pts.map(p=>p.cumulative_ack+p.outstanding),name:'in-flight',legendgroup:'in-flight',showlegend,mode:'lines',line:{color:'rgba(147,213,0,0.25)',width:0.5,shape:'hv'},fill:'tonexty',fillcolor:'rgba(147,213,0,0.12)',xaxis,yaxis,hovertemplate:'in-flight top %{y:,.0f}<br>%{x:.3f} ms<extra></extra>'}}
- function ackWindowPoints(dataDir){const reverse=dataDir==='out'?'in':'out',out=[];for(const p of packets){if(p.direction!==reverse)continue;const ack=ackOf(p,dataDir),win=scaledWindow.get(p.direction+'|'+p.time_ms);if(ack==null||win==null)continue;out.push({time:p.time_ms,ack,win,top:ack+win})}return out}
- function rwinTrace(dataDir,xaxis,yaxis,showlegend){const pts=ackWindowPoints(dataDir);return{x:pts.map(p=>p.time),y:pts.map(p=>p.top),customdata:pts.map(p=>[p.ack,p.win]),name:'ACK+WIN',legendgroup:'rwin',showlegend,mode:'lines',line:{color:'#ffd08f',width:1.5,shape:'hv'},xaxis,yaxis,hovertemplate:'<b>ACK+WIN %{y:,.0f}</b><br>ACK %{customdata[0]:,.0f}<br>WIN %{customdata[1]:,.0f}<br>%{x:.3f} ms<extra></extra>'}}
- function tsgDirection(dir,color,label,xaxis,yaxis,showlegend){return[ackTrace(dir,xaxis,yaxis,showlegend),inFlightTrace(dir,xaxis,yaxis,showlegend),rwinTrace(dir,xaxis,yaxis,showlegend),dataBars(dir,color,'data',false,xaxis,yaxis,showlegend),dataBars(dir,'#ff8077','retransmission',true,xaxis,yaxis,showlegend)]}
- function tsgRange(dir){const vals=[];for(const p of packets){if(p.direction===dir&&p.length>0){const q=seqOf(p,dir);if(q!=null)vals.push(q,q+p.length)}}for(const [t,q] of ackPoints(dir))vals.push(q);for(const p of ackWindowPoints(dir))vals.push(p.top);for(const p of o.series.filter(p=>p.direction===dir))vals.push(p.cumulative_ack+p.outstanding);if(!vals.length)return[0,1];const lo=Math.min(...vals),hi=Math.max(...vals),pad=Math.max(1,(hi-lo)*0.05);return[lo-pad,hi+pad]}
- const tsgOutRange=tsgRange('out'),tsgInRange=tsgRange('in');
- const axisStyle={gridcolor:'#29404c',zeroline:false};
- plot('gTsg',[...tsgDirection('out','#e8f2f5','client → server','x','y',true),...tsgDirection('in','#e8f2f5','server → client','x2','y2',false)],{
-   margin:{l:66,r:18,t:38,b:42},legend:{orientation:'h',x:1,xanchor:'right',y:1.08,font:{size:10}},hovermode:'x',
-   xaxis:{...axisStyle,domain:[0,1],anchor:'y',showticklabels:false},yaxis:{...axisStyle,domain:[0.55,1],title:{text:'relative sequence'},range:tsgOutRange},
-   xaxis2:{...axisStyle,domain:[0,1],anchor:'y2',matches:'x',title:{text:'time (ms)'}},yaxis2:{...axisStyle,domain:[0,0.45],title:{text:'relative sequence'},range:tsgInRange},
-   annotations:[{text:'client → server',xref:'paper',yref:'paper',x:0,y:1.04,showarrow:false,xanchor:'left',font:{color:'#93D500'}},{text:'server → client',xref:'paper',yref:'paper',x:0,y:0.49,showarrow:false,xanchor:'left',font:{color:'#d9abff'}}]
+ // ---- Wireshark-inspired TCP time/sequence plot (independent rendering) ----
+ // Separate sequence spaces for each direction. Every plotted packet carries its
+ // original frame number; clicking an event or segment selects that frame.
+ const MOD=4294967296,HALF=2147483648;
+ const bases={};
+ for(const dir of ['out','in']){
+   const first=packets.find(p=>p.direction===dir);
+   bases[dir]=first?first.seq:null;
+ }
+ function unwrap(n,base){if(n==null||base==null)return null;let d=((n-base)%MOD+MOD)%MOD;return d>=HALF?d-MOD:d}
+ function seqOf(p,dir=p.direction){return unwrap(p.seq,bases[dir])}
+ function ackOf(p,dataDir){return p.ack_flag?unwrap(p.ack,bases[dataDir]):null}
+ const winHistory=new Map(w.history.filter(p=>p.scaled!=null).map(p=>[p.direction+'|'+p.time_ms,p.scaled]));
+ const traces=[],axisStyle={gridcolor:'#29404c',zeroline:false};
+ const eventCounts={SYN:0,FIN:0,RST:0,RETRANS:0,DUPACK:0,SACK:0,ZERO:0};
+ function makeTrace(x,y,name,color,axisX,axisY,mode='lines',extras={}){
+   traces.push({x,y,name,legendgroup:name,showlegend:axisY==='y',mode,
+     line:{color,width:1.65},xaxis:axisX,yaxis:axisY,connectgaps:false,...extras});
+ }
+ function renderDir(dir,axisX,axisY){
+   const color=dir==='out'?'#b8d9fa':'#d9abff',rev=dir==='out'?'in':'out';
+   const sticks={x:[],y:[],frames:[]},retr={x:[],y:[],frames:[]};
+   const ack=[],limit=[],ackFrames=[],limitFrames=[];
+   const events=new Map();
+   const pushEvent=(tag,p,y)=>{
+     if(!events.has(tag))events.set(tag,{x:[],y:[],f:[]});
+     const e=events.get(tag);e.x.push(p.time_ms);e.y.push(y);e.f.push(p.frame);eventCounts[tag]++;
+   };
+   for(const p of packets){
+     if(p.direction===dir){
+       const q=seqOf(p);
+       if(q==null)continue;
+       const extent=p.length+(p.syn?1:0)+(p.fin?1:0);
+       if(p.length>0){
+         const target=p.retrans?retr:sticks;
+         target.x.push(p.time_ms,p.time_ms,null);
+         target.y.push(q,q+p.length,null);
+         target.frames.push(p.frame,p.frame,null);
+       }
+       if(p.syn)pushEvent('SYN',p,q);
+       if(p.fin)pushEvent('FIN',p,q+extent);
+       if(p.rst)pushEvent('RST',p,q);
+       if(p.retrans)pushEvent('RETRANS',p,q+p.length);
+     }else if(p.ack_flag){
+       const a=ackOf(p,dir);
+       if(a==null)continue;
+       ack.push([p.time_ms,a]);ackFrames.push(p.frame);
+       const win=winHistory.get(p.direction+'|'+p.time_ms);
+       if(win!=null){limit.push([p.time_ms,a+win]);limitFrames.push(p.frame)}
+       if(p.dup_ack)pushEvent('DUPACK',p,a);
+       if(p.sack)pushEvent('SACK',p,a);
+       if(p.window_present&&p.window===0&&!p.syn)pushEvent('ZERO',p,a);
+     }
+   }
+   // Render the two crucial independent lines, then the vertical data
+   // sequence-range sticks. Window values only appear when scaling is known.
+   makeTrace(ack.map(p=>p[0]),ack.map(p=>p[1]),'Cumulative ACK','#65d88a',axisX,axisY,'lines',
+     {line:{color:'#65d88a',width:2,shape:'hv'},customdata:ackFrames,
+      hovertemplate:'ACK %{y:,.0f}<br>%{x:.3f} ms<br>frame %{customdata}<extra></extra>'});
+   makeTrace(limit.map(p=>p[0]),limit.map(p=>p[1]),'Receive window edge','#ffd08f',axisX,axisY,'lines',
+     {line:{color:'#ffd08f',width:2,shape:'hv'},customdata:limitFrames,
+      hovertemplate:'ACK + receive window %{y:,.0f}<br>%{x:.3f} ms<br>frame %{customdata}<extra></extra>'});
+   makeTrace(sticks.x,sticks.y,'Data segments',color,axisX,axisY,'lines',
+     {line:{color,width:1.5},customdata:sticks.frames,
+      hovertemplate:'Data sequence %{y:,.0f}<br>%{x:.3f} ms<br>frame %{customdata}<extra></extra>'});
+   makeTrace(retr.x,retr.y,'Retransmitted data','#ff8077',axisX,axisY,'lines',
+     {line:{color:'#ff8077',width:2.5},customdata:retr.frames,
+      hovertemplate:'Retransmission %{y:,.0f}<br>%{x:.3f} ms<br>frame %{customdata}<extra></extra>'});
+   const styles={
+     SYN:['triangle-up','#64d9ff'],FIN:['triangle-down','#ffd08f'],
+     RST:['x','#ff5353'],RETRANS:['diamond','#ff8077'],
+     DUPACK:['circle-open','#f8d66d'],SACK:['square','#cc95ff'],
+     ZERO:['cross','#ff5353']};
+   for(const [tag,e] of events){
+     const [symbol,col]=styles[tag];
+     makeTrace(e.x,e.y,tag,col,axisX,axisY,'markers',
+       {marker:{symbol,color:col,size:tag==='RST'||tag==='ZERO'?11:8,line:{width:1,color:'#09131b'}},
+        customdata:e.f,
+        hovertemplate:tag+'<br>frame %{customdata}<br>%{x:.3f} ms<br>seq %{y:,.0f}<extra></extra>'});
+   }
+ }
+ renderDir('out','x','y');renderDir('in','x2','y2');
+ const ranges={};
+ for(const [dir,axisY] of [['out','y'],['in','y2']]){
+   let low=Infinity,high=-Infinity;
+   for(const trace of traces.filter(t=>t.yaxis===axisY)){
+     for(const value of trace.y){if(Number.isFinite(value)){low=Math.min(low,value);high=Math.max(high,value)}}
+   }
+   if(!Number.isFinite(low)){low=0;high=1}
+   const pad=Math.max(1,(high-low)*.04);ranges[axisY]=[low-pad,high+pad];
+ }
+ const ready=plot('gTsg',traces,{
+   margin:{l:80,r:18,t:50,b:55},
+   legend:{orientation:'h',x:0,y:1.12,font:{size:10}},
+   hovermode:'closest',dragmode:'zoom',
+   xaxis:{...axisStyle,domain:[0,1],anchor:'y',showticklabels:false},
+   yaxis:{...axisStyle,domain:[.55,1],range:ranges.y,title:{text:'client → server seq'}},
+   xaxis2:{...axisStyle,domain:[0,1],anchor:'y2',matches:'x',title:{text:'time (ms)'}},
+   yaxis2:{...axisStyle,domain:[0,.45],range:ranges.y2,title:{text:'server → client seq'}}
  });
- $('gTsgNote').textContent='tcptrace-style model: data/retransmission sticks over cumulative ACK, ACK+WIN (scaled receive-window ceiling), and shaded observed in-flight bytes. Directions use independent relative sequence spaces and a shared time axis.';
+ if(ready&&typeof ready.then==='function')ready.then(()=>{
+   const target=$('gTsg');target.removeAllListeners?.('plotly_click');
+   target.on('plotly_click',ev=>{
+     const frame=ev.points?.[0]?.customdata;
+     const packet=packets.find(p=>p.frame===Number(frame));
+     if(packet)selectPacket(packet);
+   });
+ });
+ $('gTsgNote').textContent='Blue/purple sticks = data; green = cumulative ACK; amber = ACK + advertised receive window. Markers: SYN '+eventCounts.SYN+', FIN '+eventCounts.FIN+', RST '+eventCounts.RST+', retrans '+eventCounts.RETRANS+', dup ACK '+eventCounts.DUPACK+', SACK '+eventCounts.SACK+', zero window '+eventCounts.ZERO+'. Click plotted packets to inspect them. Window edge requires known scale; SACK markers show presence, not block ranges.';
  // Throughput follows tcptrace-ng's sliding-window concepts: wire bytes,
  // cumulative-ACK progress (goodput), and the receive-window/RTT ceiling.
  const spanMs=Math.max(1,packets.length?packets[packets.length-1].time_ms:1);
