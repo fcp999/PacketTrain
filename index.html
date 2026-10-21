@@ -210,6 +210,7 @@ function renderGraphs(){const has=flow&&flow.accounting;$('graphsCard').hidden=!
  function unwrap(n,base){if(n==null||base==null)return null;let d=((n-base)%MOD+MOD)%MOD;return d>=HALF?d-MOD:d}
  function seqOf(p,dir=p.direction){return unwrap(p.seq,bases[dir])}
  function ackOf(p,dataDir){return p.ack_flag?unwrap(p.ack,bases[dataDir]):null}
+ function ackPoints(dir){const reverse=dir==='out'?'in':'out';return packets.filter(p=>p.direction===reverse&&p.ack_flag).map(p=>[p.time_ms,ackOf(p,dir)]).filter(p=>p[1]!=null)}
  const winHistory=new Map(w.history.filter(p=>p.scaled!=null).map(p=>[p.direction+'|'+p.time_ms,p.scaled]));
  const traces=[],axisStyle={gridcolor:'#29404c',zeroline:false};
  const eventCounts={SYN:0,FIN:0,RST:0,RETRANS:0,DUPACK:0,SACK:0,ZERO:0};
