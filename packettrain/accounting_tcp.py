@@ -77,17 +77,27 @@ def unique_payload(ranges):
 
 
 def window_scale(packets, from_client):
-    """Negotiated window scale shift for one direction, or None if not seen.
+    """Negotiated window scale shift for one direction.
 
-    The shift is advertised in a SYN option. A SYN's own window value is
-    unscaled; scaling applies to later segments. None means the scale is
-    unknown, which is not the same as shift 0.
+    Three cases, which the caller must be able to tell apart:
+
+    * The SYN carries a window scale option: return its shift.
+    * The SYN is present but the option is absent: return 0. Per RFC 7323 an
+      absent option means no scaling is in use, so the advertised window is the
+      real window. This is the common case for older or minimal stacks and is
+      not "unknown".
+    * No SYN for this direction was captured at all: return None, because the
+      shift cannot be known. None is not the same as shift 0.
     """
     wanted = "out" if from_client else "in"
+    syn_seen = False
     for p in packets:
-        if p.get("syn") and p["direction"] == wanted and p.get("wscale", -1) >= 0:
-            return p["wscale"]
-    return None
+        if p.get("syn") and p["direction"] == wanted:
+            syn_seen = True
+            if p.get("wscale", -1) >= 0:
+                return p["wscale"]
+    # A SYN without the option means shift 0; no SYN means genuinely unknown.
+    return 0 if syn_seen else None
 
 
 def scaled_window(packets):

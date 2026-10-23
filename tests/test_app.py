@@ -464,19 +464,42 @@ def test_unique_payload_handles_wraparound():
     assert acc.unique_payload([(top - 100, top), (0, 100)]) == 200
 
 
-def test_window_scale_is_none_when_not_advertised():
-    """Unknown scale must be None, never an assumed 0."""
+def test_window_scale_defaults_to_zero_when_syn_lacks_the_option():
+    """A SYN without a window scale option means shift 0, not unknown.
+
+    Per RFC 7323 the option is opt-in: absent means no scaling, so the
+    advertised window is already the real window. Treating this as unknown
+    suppressed the ACK+window ceiling for every such capture.
+    """
     acc = packettrain.accounting_tcp
     lines = [
-        row(1, 0.000, 1, 100, 0, {"tcp.flags.syn": "1"}),
-        row(2, 0.100, 1, 200, 1400, {"tcp.flags.ack": "1"}),
+        row(1, 0.000, 1, 100, 0, {"tcp.flags.syn": "1", "tcp.window_size": "65535"}),
+        row(2, 0.100, 1, 200, 1400, {"tcp.flags.ack": "1", "tcp.window_size": "7304"}),
     ]
     packets = _stream(packettrain.parse_rows(lines))
     packets[1].update(src="198.51.100.2", dst="192.0.2.1", sport=443, dport=50000)
     result = acc.scaled_window(packets)
-    assert result["client_scale_shift"] is None
+    assert result["client_scale_shift"] == 0
+    # The other side sent no SYN, so its shift genuinely cannot be known.
     assert result["server_scale_shift"] is None
-    # Reported unscaled, and labelled as such rather than multiplied by 1.
+    # Shift 0 multiplies by 1: scaled equals raw for non-SYN segments.
+    scaled = [pt for pt in result["history"] if pt["scaled"] is not None]
+    assert scaled, "expected scaled values with a zero shift"
+    for pt in scaled:
+        assert pt["scaled"] == pt["raw"]
+
+
+def test_window_scale_is_none_when_no_syn_was_captured():
+    """With no SYN at all the shift is unknowable and must stay None."""
+    acc = packettrain.accounting_tcp
+    lines = [
+        row(1, 0.000, 1, 100, 1400, {"tcp.flags.ack": "1", "tcp.window_size": "7304"}),
+        row(2, 0.100, 1, 1500, 1400, {"tcp.flags.ack": "1", "tcp.window_size": "7304"}),
+    ]
+    packets = _stream(packettrain.parse_rows(lines))
+    result = acc.scaled_window(packets)
+    assert result["client_scale_shift"] is None
+    # Nothing is multiplied, and the basis says so rather than implying scale 1.
     assert all(pt["scaled"] is None for pt in result["history"])
     assert all("unscaled" in pt["counting_basis"] for pt in result["history"])
 
