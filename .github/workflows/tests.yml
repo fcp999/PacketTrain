@@ -1,0 +1,29 @@
+name: PacketTrain tests
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements.txt pytest
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y tshark
+      - name: Build indexer
+        run: |
+          cargo build --release --locked --manifest-path indexer/Cargo.toml
+          echo "$PWD/indexer/target/release" >> "$GITHUB_PATH"
+      - name: Compile and test
+        run: |
+          python -m compileall -q app.py packettrain tests
+          python -m pytest -q
