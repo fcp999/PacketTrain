@@ -40,6 +40,10 @@
 <div id="status" class="status">Choose a capture to begin.</div><div id="priorityPanels" aria-label="Promoted analysis panels"></div>
 <section class="card https-card" id="httpsCard" hidden><h2>HTTPS / TLS analysis</h2><p id="httpsIdentity"></p><ul id="httpsTiming"></ul><p id="httpsBehavior"></p><p class="small hint" id="httpsLimit"></p></section>
 <section class="card" id="transactionsCard" hidden style="margin-bottom:15px"><h2>Encrypted exchanges / transaction candidates</h2><div id="transactionSummary" class="hint small"></div><div id="transactionPeriod" class="small"></div><div id="transactionHistogram" class="plot" style="height:200px"></div><div class="hint small">Select a row to highlight its packet interval. Byte counts include TLS overhead.</div><div class="table-wrap"><table class="packet-table"><thead><tr><th>#</th><th>Start (ms)</th><th>Client B</th><th>Server B</th><th>Wait (ms)</th><th>Service est. (ms)</th><th>Response span (ms)</th><th>Idle after (ms)</th><th>Frames</th><th>Confidence</th></tr></thead><tbody id="transactionRows"></tbody></table></div><button type="button" id="clearTransactionRange">Clear interval</button><p id="transactionLimit" class="hint small"></p></section>
+<section class="card" id="diagnosisCard" hidden><h2>Evidence-based diagnosis</h2><div id="diagnosisRows"></div><p class="hint small" id="diagnosisLimit"></p></section>
+<section class="card" id="exchangeFingerprintCard" hidden><h2>Encrypted exchange fingerprints</h2><p class="hint small">Approximate size groups, not application identities. Select a group to inspect its first exchange.</p><div class="table-wrap"><table class="packet-table"><thead><tr><th>Count</th><th>Client B</th><th>Server B</th><th>Median wait</th><th>Max wait</th></tr></thead><tbody id="exchangeFingerprintRows"></tbody></table></div></section>
+<section class="card" id="activityCard"><h2>Capture-wide activity</h2><div class="controls"><label><input type="checkbox" id="activityClient" checked>Selected client only</label><button id="loadActivity">Load timeline</button></div><div id="activityNote" class="hint small"></div><div id="activityPlot" class="plot" style="height:380px"></div></section>
+<section class="card" id="compareCard"><h2>Compare captures</h2><div class="controls"><label>Capture B <select id="compareFile"></select></label><label>Stream B <input id="compareStream" type="number" min="0" step="1" value="0"></label><label>Clock B − A (ms, optional) <input id="compareOffset" type="number" step="any" placeholder="Unknown"></label><button id="runCompare">Compare selected flow</button></div><div id="compareOutput" class="small"></div></section>
 <section class="card slicing-card" id="slicingCard" hidden><div class="tag" id="slicingTag"></div><h2>Capture slicing detected</h2><p id="slicingDetail"></p><p class="small" id="slicingAdvice"></p></section>
 <section class="card pos-card" id="positionCard" hidden><div class="tag" id="positionTag"></div><h2>Capture position</h2><p id="positionSide"></p><ul id="positionEvidence"></ul><p class="small hint" id="positionLimit"></p></section>
 <section class="card phase-card" id="phaseCard" hidden><h2>Behaviour phases</h2><div class="hint small" id="phaseMeta"></div><div class="table-wrap"><table class="packet-table"><thead><tr><th>#</th><th>Phase</th><th>Start</th><th>Duration</th><th>Records</th><th>Evidence</th></tr></thead><tbody id="phaseRows"></tbody></table></div><p class="small hint" id="phaseLimit"></p></section>
@@ -182,6 +186,80 @@ function highlightTransactions(){
  for(const [tr,x] of transactionRows)tr.classList.toggle('sel',selection.from!=null&&selection.to!=null&&x.start_ms===selection.from&&x.end_ms===selection.to)
 }
 $('clearTransactionRange').onclick=()=>clearSelection();
+
+
+function showDiagnostics(d, groups){
+ $('diagnosisCard').hidden=!d;$('diagnosisRows').replaceChildren();
+ if(d){
+  $('diagnosisLimit').textContent=d.basis;
+  if(!d.findings.length)$('diagnosisRows').textContent='No configured diagnostic rule fired; this does not establish a healthy flow.';
+  for(const f of d.findings){
+   const row=document.createElement('div');row.className='sym';
+   const title=document.createElement('b');title.textContent=f.kind+' · '+f.strength;row.append(title);
+   const note=document.createElement('div');note.textContent=f.evidence+(f.frames.length?' Frames '+f.frames.join(', '):'');row.append(note);
+   if(f.interval||f.frames.length){const button=document.createElement('button');button.type='button';button.textContent='Inspect evidence';button.onclick=()=>{if(f.interval){stop();setTime(Math.max(timeStart,f.interval[0]));setSelection(null,...f.interval)}else{const p=flow?.packets.find(p=>p.frame===f.frames[0]);if(p)selectPacket(p)}};row.append(button)}
+   $('diagnosisRows').append(row)
+  }
+ }
+ $('exchangeFingerprintCard').hidden=!groups?.length;$('exchangeFingerprintRows').replaceChildren();
+ for(const g of groups||[]){
+  const tr=document.createElement('tr');tr.tabIndex=0;
+  for(const v of [g.count,g.request_median_bytes,g.response_median_bytes,g.wait_median_ms+' ms',g.wait_max_ms+' ms']){const td=document.createElement('td');td.textContent=v;tr.append(td)}
+  const choose=()=>{const x=flow?.transactions?.exchanges.find(x=>x.id===g.exchange_ids[0]);if(x){stop();setTime(Math.max(timeStart,x.start_ms));setSelection(null,x.start_ms,x.end_ms)}};
+  tr.onclick=choose;tr.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();choose()}};$('exchangeFingerprintRows').append(tr)
+ }
+}
+let workspaceRequest=0;
+function resetWorkspaceExtras(){
+ workspaceRequest++;$('activityNote').textContent='';$('compareOutput').replaceChildren();
+ if(window.Plotly&&$('activityPlot').data)Plotly.purge($('activityPlot'));
+ $('loadActivity').disabled=false;$('runCompare').disabled=false;
+}
+async function workspaceApi(path,valid){
+ for(let i=0;i<120;i++){
+  const response=await fetch(path,{cache:'no-store'}),data=await response.json();
+  if(!valid())return null;
+  if(response.status===202){await new Promise(r=>setTimeout(r,1000));continue}
+  if(!response.ok)throw Error(data.error||'Analysis failed');
+  return data
+ }
+ throw Error('Index is still building; retry.')
+}
+$('loadActivity').onclick=async()=>{
+ const file=$('file').value;if(!file)return;
+ const token=++workspaceRequest,valid=()=>token===workspaceRequest&&file===$('file').value;
+ $('runCompare').disabled=false;
+ const client=$('activityClient').checked?flow?.summary.client:null;
+ $('loadActivity').disabled=true;$('activityNote').textContent='Reading flow lifetimes…';
+ try{
+  const d=await workspaceApi(BASE+'/api/activity?'+new URLSearchParams({file,...(client?{client}:{})}),valid);if(!d||!valid())return;
+  $('activityNote').textContent=d.shown+' of '+d.total+' flows. '+d.basis+' Click a bar to load its stream.';
+  if(!window.Plotly)return;
+  const labels=d.flows.map(f=>f.id+' · '+f.client+' → '+f.server);
+  await Plotly.react('activityPlot',[{type:'bar',orientation:'h',y:labels,x:d.flows.map(f=>Math.max(.001,f.end_ms-f.start_ms)),base:d.flows.map(f=>f.start_ms),customdata:d.flows.map(f=>f.id),marker:{color:'#93D500'},hovertemplate:'%{y}<br>Duration %{x:.2f} ms<extra></extra>'}],{...PLOT_LAYOUT,height:Math.max(250,Math.min(1400,d.shown*19+70)),showlegend:false,yaxis:{autorange:'reversed',automargin:true},xaxis:{title:{text:'ms from capture start'}}},PLOT_CONFIG);
+  if(!valid())return;const el=$('activityPlot');el.removeAllListeners?.('plotly_click');el.on('plotly_click',e=>{const id=String(e.points[0].customdata);if([...$('stream').options].some(o=>o.value===id)){$('stream').value=id;loadSelectedFlow()}});
+ }catch(e){if(valid())$('activityNote').textContent=e.message}finally{if(valid())$('loadActivity').disabled=false}
+};
+function syncCompareOptions(){
+ const selected=$('compareFile').value;
+ $('compareFile').replaceChildren(...[...$('file').options].map(o=>new Option(o.textContent,o.value)));
+ if([...$('compareFile').options].some(o=>o.value===selected))$('compareFile').value=selected;
+}
+new MutationObserver(syncCompareOptions).observe($('file'),{childList:true});
+$('runCompare').onclick=async()=>{
+ const file=$('file').value,stream=$('stream').value,other=$('compareFile').value,other_stream=$('compareStream').value;
+ if(!file||stream===''||!other||other_stream==='')return;
+ const token=++workspaceRequest,valid=()=>token===workspaceRequest&&file===$('file').value&&stream===$('stream').value;
+ $('loadActivity').disabled=false;const box=$('compareOutput');box.textContent='Comparing packet signatures…';$('runCompare').disabled=true;
+ try{
+  const d=await workspaceApi(BASE+'/api/compare?'+new URLSearchParams({file,stream,other,other_stream,clock_offset_ms:$('compareOffset').value}),valid);if(!d||!valid())return;
+  box.replaceChildren();const line=t=>{const el=document.createElement('p');el.textContent=t;box.append(el)};
+  line(d.unique_matches+' unique matches · '+d.ambiguous_signatures+' ambiguous signatures excluded');
+  for(const x of d.directions)line((x.direction==='out'?'Client → server':'Server → client')+': '+x.unique_matches+' matches, '+x.only_a_records+' A-only / '+x.only_b_records+' B-only; median signed B−A '+(x.median_timestamp_delta_ms??'unknown')+' ms'+(x.median_corrected_delta_ms==null?'':' · corrected '+x.median_corrected_delta_ms+' ms'));
+  line(d.basis);
+  const pre=document.createElement('pre');pre.textContent=d.examples.map(x=>'A frame '+x.frame_a+' ↔ B frame '+x.frame_b+' · '+x.direction+' · '+x.delta_ms+' ms').join('\n');box.append(pre)
+ }catch(e){if(valid())box.textContent=e.message}finally{if(valid())$('runCompare').disabled=false}
+};
 
 function showHttps(t){$('httpsCard').hidden=!t;if(!t)return;const ms=x=>(x===null||x===undefined)?'not observed':`${x.toFixed(2)} ms`;$('httpsIdentity').textContent=`SNI: ${t.sni||'not visible'} · Client ALPN offer: ${t.alpn_offered||'not visible'}`;if(!t.behavior){$('httpsTiming').replaceChildren();$('httpsBehavior').textContent='TLS records are present but no handshake was decoded, so the conversation cannot be classified beyond "encrypted".';$('httpsLimit').textContent=t.limitation;return}const rows=[`ClientHello → ServerHello: ${ms(t.client_hello_to_server_hello_ms)} (${captureSide==='server'?'mostly server handling at this capture point':captureSide==='client'?'network round trip plus server handling':'network and/or server delay; capture point unknown'})`,`ServerHello → first server ciphertext: ${ms(t.server_hello_to_first_server_cipher_ms)} (encrypted handshake phase; not pure key exchange)`];$('httpsTiming').replaceChildren();for(const item of rows){let li=document.createElement('li');li.textContent=item;$('httpsTiming').append(li)}$('httpsBehavior').textContent=`Encrypted conversation: ${t.behavior.label} (${t.behavior.confidence} confidence). ${t.behavior.evidence.join('; ')}.`;$('httpsLimit').textContent=t.limitation}
 function showSlicing(s){$('slicingCard').hidden=!s||!s.sliced;if(!s||!s.sliced)return;$('slicingTag').textContent=`${s.sliced_frames} of ${s.total} frames · ${s.lost_bytes.toLocaleString()} bytes not captured`;$('slicingDetail').textContent=`This capture stores ${(s.sliced_fraction*100).toFixed(1)}% of its frames shorter than they were on the wire, so payload records and TLS fields in those frames were never recorded.`;$('slicingAdvice').textContent=s.advice||''}
@@ -353,7 +431,7 @@ async function waitForIndex(file){for(;;){let r=await fetch(BASE+'/api/index?fil
 function options(select,items,fmt,value){select.replaceChildren();for(const item of items){let o=document.createElement('option');o.value=value(item);o.textContent=fmt(item);select.append(o)}}
 async function refresh(autoLoad=true){let previous=$('file').value||new URLSearchParams(location.search).get('file')||'';try{let d=await api(BASE+'/api/files');options($('file'),d.files,x=>`${x.name} · ${(x.bytes/1048576).toFixed(1)} MiB`,x=>x.name);$('file').value=previous;if(!$('file').value&&d.files.length)$('file').selectedIndex=0;await streams(autoLoad);if(!flow)status(d.files.length?`${d.files.length} capture(s) found in ${d.directory}`:`No captures found in ${d.directory}${d.error?' ('+d.error+')':''}`)}catch(e){status(e.message,true)}}
 function installCombined(d){resetHttpObjects();updateStreamNav();flow=d.flow;if(!flow)return;build();if(d.payload){const request=payloadState.request+1;payloadState={frame:null,data:d.payload,view:payloadState.view,loading:false,request};$('payloadCard').hidden=false;showPayload(d.payload)}}
-async function streams(autoLoad=true){const request=++streamRequest,file=$('file').value;flow=null;stop();showPattern(null);showHttps(null);showTransactions(null);showSlicing(null);showPosition(null);showPhases(null);showSymptoms(null);showFingerprint(null);$('bounceCard').hidden=true;clearGraphs();clearSelection();rowIndex.clear();phaseRows=[];bounceArrows=[];setGraphsVisible(false);clearPayload();$('play').disabled=true;$('step').disabled=true;$('stream').replaceChildren();if(!file)return;try{status('Preparing capture index…');let indexed=await waitForIndex(file),d;if(request!==streamRequest)return;indexedFile=indexed?file:null;if(indexed){d=indexed;options($('stream'),d.streams,x=>`${x.id} · ${x.pattern} · ${x.client}:${x.client_port} → ${x.server}:${x.server_port} · ${x.packets} records`,x=>x.id);if(d.streams.length)$('stream').selectedIndex=0;const requestedStream=new URLSearchParams(location.search).get('stream');if(requestedStream!==null&&[...$('stream').options].some(o=>o.value===requestedStream))$('stream').value=requestedStream;if(autoLoad&&d.streams.length){status('Extracting and analyzing selected flow…');d=await api(BASE+`/api/bootstrap?file=${encodeURIComponent(file)}&stream=${encodeURIComponent($('stream').value)}&include_streams=0`);if(request!==streamRequest)return;installCombined(d);if(captureSide!=='unknown')status(`Loaded stream ${d.flow.summary.id}: ${d.flow.packets.length} packets · indexed extraction`)}else status(`${indexed.streams.length} indexed TCP streams in ${file}`)}else{status(autoLoad?'Analyzing capture in one TShark pass…':'Reading TCP streams…');d=await api(BASE+(autoLoad?'/api/bootstrap?file=':'/api/streams?file=')+encodeURIComponent(file));if(request!==streamRequest)return;options($('stream'),d.streams,x=>`${x.id} · ${x.pattern} · ${x.client}:${x.client_port} → ${x.server}:${x.server_port} · ${x.packets} records`,x=>x.id);if(d.streams.length)$('stream').selectedIndex=0;if(autoLoad&&d.flow){$('stream').value=String(d.flow.summary.id);installCombined(d);if(captureSide!=='unknown')status(`Loaded stream ${d.flow.summary.id}: ${d.flow.packets.length} packets · one TShark pass`)}else status(`${d.streams.length} TCP streams in ${file}`)}}catch(e){status(e.message,true)}}
+async function streams(autoLoad=true){const request=++streamRequest,file=$('file').value;flow=null;stop();showPattern(null);showHttps(null);showTransactions(null);showDiagnostics(null,[]);resetWorkspaceExtras();showSlicing(null);showPosition(null);showPhases(null);showSymptoms(null);showFingerprint(null);$('bounceCard').hidden=true;clearGraphs();clearSelection();rowIndex.clear();phaseRows=[];bounceArrows=[];setGraphsVisible(false);clearPayload();$('play').disabled=true;$('step').disabled=true;$('stream').replaceChildren();if(!file)return;try{status('Preparing capture index…');let indexed=await waitForIndex(file),d;if(request!==streamRequest)return;indexedFile=indexed?file:null;if(indexed){d=indexed;options($('stream'),d.streams,x=>`${x.id} · ${x.pattern} · ${x.client}:${x.client_port} → ${x.server}:${x.server_port} · ${x.packets} records`,x=>x.id);if(d.streams.length)$('stream').selectedIndex=0;const requestedStream=new URLSearchParams(location.search).get('stream');if(requestedStream!==null&&[...$('stream').options].some(o=>o.value===requestedStream))$('stream').value=requestedStream;if(autoLoad&&d.streams.length){status('Extracting and analyzing selected flow…');d=await api(BASE+`/api/bootstrap?file=${encodeURIComponent(file)}&stream=${encodeURIComponent($('stream').value)}&include_streams=0`);if(request!==streamRequest)return;installCombined(d);if(captureSide!=='unknown')status(`Loaded stream ${d.flow.summary.id}: ${d.flow.packets.length} packets · indexed extraction`)}else status(`${indexed.streams.length} indexed TCP streams in ${file}`)}else{status(autoLoad?'Analyzing capture in one TShark pass…':'Reading TCP streams…');d=await api(BASE+(autoLoad?'/api/bootstrap?file=':'/api/streams?file=')+encodeURIComponent(file));if(request!==streamRequest)return;options($('stream'),d.streams,x=>`${x.id} · ${x.pattern} · ${x.client}:${x.client_port} → ${x.server}:${x.server_port} · ${x.packets} records`,x=>x.id);if(d.streams.length)$('stream').selectedIndex=0;if(autoLoad&&d.flow){$('stream').value=String(d.flow.summary.id);installCombined(d);if(captureSide!=='unknown')status(`Loaded stream ${d.flow.summary.id}: ${d.flow.packets.length} packets · one TShark pass`)}else status(`${d.streams.length} TCP streams in ${file}`)}}catch(e){status(e.message,true)}}
 function flags(p){return [p.syn?'SYN':'',p.ack_flag?'ACK':'',p.fin?'FIN':'',p.rst?'RST':'',p.psh?'PSH':'',p.retrans?'RETRANS':'',p.dup_ack?'DUP ACK':'',p.sack?'SACK':''].filter(Boolean).join(' ')||'TCP'}
 function selectPacket(p){if(!p)return;stop();setTime(Math.max(timeStart,p.time_ms-(isLocal(p)?0:travel)));setSelection(p.frame);detail(p);}
 function detail(p){$('detail').textContent=`Frame ${p.frame} · ${p.time_ms.toFixed(3)} ms\n${p.src}:${p.sport} → ${p.dst}:${p.dport}\n${flags(p)} · payload ${p.length} B · frame ${p.frame_length} B\nSEQ ${p.seq} · ACK ${p.ack} · window ${p.window}${p.ack_rtt_ms?' · ACK RTT '+p.ack_rtt_ms.toFixed(2)+' ms':''}`;$('detail').style.whiteSpace='pre-line';loadPayload(p.frame)}
@@ -439,7 +517,7 @@ function renderGraphs(){const has=flow&&flow.accounting;setGraphsVisible(!!has);
  plot('gRtt',[{x:rttOut.map(p=>p[0]),y:rttOut.map(p=>p[1]),name:'client \u2192 server',mode:'markers',marker:{color:'#93D500',size:5}},{x:rttIn.map(p=>p[0]),y:rttIn.map(p=>p[1]),name:'server \u2192 client',mode:'markers',marker:{color:'#d9abff',size:5}}],{xaxis:{title:{text:'ms'}},yaxis:{title:{text:'ms'}}});
  $('graphsHint').textContent=`${packets.length} records · ${acc.unique_payload_bytes.client+acc.unique_payload_bytes.server} unique payload bytes (retransmission overlap counted once)`;
 }
-for(const id of ['metricsCard','httpsCard','transactionsCard','slicingCard','positionCard','phaseCard','symptomCard','fpCard','patternCard','motionCard','packetDetailCard','graphsCard','payloadCard','packetEventsCard'])makeCollapsible(id,false);
+for(const id of ['metricsCard','httpsCard','transactionsCard','diagnosisCard','exchangeFingerprintCard','activityCard','compareCard','slicingCard','positionCard','phaseCard','symptomCard','fpCard','patternCard','motionCard','packetDetailCard','graphsCard','payloadCard','packetEventsCard'])makeCollapsible(id,false);
 makeCollapsible('bounceCard',true);
 installGraphPromoteButtons();setGraphsVisible(false);restorePanelLayout();$('resetPanels').onclick=resetPanelLayout;
 $('prevStream').onclick=()=>stepStream(-1);$('nextStream').onclick=()=>stepStream(1);
@@ -495,7 +573,7 @@ if(rttSpread&&!rttSpread.insufficient){
  $('rtt').innerHTML=(rtt?`${rtt.toFixed(1)} <small>ms</small>`:`${spread.median_ms.toFixed(1)} <small>ms</small>`)
   +`<small class="rttTail"> P95 ${spread.p95_ms.toFixed(1)}</small>`;
 }$('serialize').innerHTML=frameBytes?`${(frameBytes*8/(rate*1000)).toFixed(2)} <small>ms / ${frameBytes} B</small>`:'—';$('bdp').innerHTML=rtt?`${(rate*1000*rtt/8/1000).toFixed(1)} <small>kB</small>`:'—';$('meta').textContent=`Effective capture side: ${captureSide}${flow.capture_side!==captureSide?' (handshake said: '+flow.capture_side+')':''}${flow.handshake_legs_ms?' ['+flow.handshake_legs_ms.join(' / ')+' ms]':''}. RTT source: ${override>0?'manual override':flow.rtt_source}. ${flow.note}`;
- showPattern(flow.pattern);showHttps(flow.https);showTransactions(flow.transactions);showSlicing(flow.slicing);renderGraphs();showPosition(flow.position);showPhases(flow.phases);showSymptoms(flow.symptoms);showFingerprint(flow.fingerprint);renderBounce();loadPlayback();
+ showPattern(flow.pattern);showHttps(flow.https);showTransactions(flow.transactions);showDiagnostics(flow.diagnosis,flow.exchange_fingerprints);showSlicing(flow.slicing);renderGraphs();showPosition(flow.position);showPhases(flow.phases);showSymptoms(flow.symptoms);showFingerprint(flow.fingerprint);renderBounce();loadPlayback();
  const facts=[trace.mss?.length?'Advertised MSS: '+trace.mss.join(' / ')+' B':'MSS unavailable',trace.large_capture_records?`${trace.large_capture_records} large capture records (GRO/LRO or jumbo)`:'',trace.first_flight_packets?`First data flight: ${trace.first_flight_packets} captured records / ${trace.first_flight_bytes.toLocaleString()} B`:'',`${trace.retransmissions||0} retransmissions · ${trace.sack_packets||0} SACK records · ${trace.psh_packets||0} PSH records`];$('facts').textContent=facts.filter(Boolean).join('  •  ');$('packetCount').previousElementSibling.textContent='Captured TCP records';
  const burst=trace.burst||{};
  const measured=burst.available?burst.capture_rate_mbps:null;
@@ -521,6 +599,6 @@ $('play').onclick=()=>{if(timer){stop();return}if(clock>=duration)setTime(timeSt
  if(!skipping){const gap=nextCompressedAfter(clock);if(gap&&!expandedGaps[gap.start_ms]&&next>=gap.start_ms){setTime(gap.start_ms);skipping=true;showSkipLabel(gap);setTimeout(()=>{if(!timer)return;skipping=false;setTime(gap.end_ms);hideSkipLabel()},800);return}}
  setTime(next);const limit=(selection.to!=null&&selection.from!=null)?selection.to:duration;if(clock>=limit)stop()},30)};
 $('step').onclick=()=>{stop();let next=events.filter(e=>e.start>clock+0.0001).sort((a,b)=>a.start-b.start)[0];setTime(next?next.start:duration);if(next)detail(next.p)};
-$('scrub').oninput=e=>{stop();setTime(e.target.value)};$('pmode').onchange=loadPlayback;$('speed').oninput=()=>{userSetSpeed=true;updateSpeedLabel()};$('speed').onchange=loadPlayback;$('speedReset').onclick=()=>{userSetSpeed=false;$('speed').value=0;updateSpeedLabel();if(flow&&flow.rtt_ms)applyAutoSpeed(flow.rtt_ms);loadPlayback()};updateSpeedLabel();async function loadSelectedFlow(){resetHttpObjects();updateStreamNav();const request=++streamRequest;let file=$('file').value,stream=$('stream').value;if(!file||stream==='')return;stop();try{status('Analyzing flow and payload in one TShark pass…');const d=await api(BASE+`/api/bootstrap?file=${encodeURIComponent(file)}&stream=${encodeURIComponent(stream)}${indexedFile===file?'&include_streams=0':''}`);if(request!==streamRequest)return;installCombined(d);if(captureSide!=='unknown'&&(Number($('rttOverride').value)>0||flow.rtt_ms))status(`Loaded stream ${stream}: ${flow.packets.length} packets · ${d.indexed?'indexed extraction':'one TShark pass'}`)}catch(e){status(e.message,true)}}
+$('scrub').oninput=e=>{stop();setTime(e.target.value)};$('pmode').onchange=loadPlayback;$('speed').oninput=()=>{userSetSpeed=true;updateSpeedLabel()};$('speed').onchange=loadPlayback;$('speedReset').onclick=()=>{userSetSpeed=false;$('speed').value=0;updateSpeedLabel();if(flow&&flow.rtt_ms)applyAutoSpeed(flow.rtt_ms);loadPlayback()};updateSpeedLabel();async function loadSelectedFlow(){resetWorkspaceExtras();resetHttpObjects();updateStreamNav();const request=++streamRequest;let file=$('file').value,stream=$('stream').value;if(!file||stream==='')return;stop();try{status('Analyzing flow and payload in one TShark pass…');const d=await api(BASE+`/api/bootstrap?file=${encodeURIComponent(file)}&stream=${encodeURIComponent(stream)}${indexedFile===file?'&include_streams=0':''}`);if(request!==streamRequest)return;installCombined(d);if(captureSide!=='unknown'&&(Number($('rttOverride').value)>0||flow.rtt_ms))status(`Loaded stream ${stream}: ${flow.packets.length} packets · ${d.indexed?'indexed extraction':'one TShark pass'}`)}catch(e){status(e.message,true)}}
 $('fullConversation').onclick=()=>{clearSelection();$('rangeNote').textContent='Full conversation';};$('refresh').onclick=()=>refresh(true);$('file').onchange=()=>streams(true);$('stream').onchange=()=>{updateStreamNav();loadSelectedFlow()};$('load').onclick=loadSelectedFlow;for(const id of ['rate','pshToggle','eventsToggle','side','rttOverride'])$(id).onchange=()=>{if(flow)build()};refresh(true);
 </script></body></html>

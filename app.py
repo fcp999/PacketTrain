@@ -19,6 +19,7 @@ from packettrain.config import EXTENSIONS, FIELDS, MAX_BYTES, MAX_PACKETS, captu
 from packettrain.decode import (decimal, flag_bits, flag_set, num, parse_rows,
                                read_capture, read_capture_with_follow, slicing_report)
 from packettrain.https import analyze_https
+from packettrain.cross_capture import activity_timeline, compare_streams
 from packettrain.http_objects import extract_http_objects, MAX_HTTP_EXPORT_BYTES
 from packettrain.payload import (CONVERSATION_PREVIEW_BYTES, MAX_CONVERSATION_PAGE_BYTES,
                                  conversation_from_follow_output, decode_conversation, decode_segment)
@@ -69,6 +70,74 @@ def topology_data():
     if state["state"] != "ready":
         return jsonify(state), (202 if state["state"] == "indexing" else 422)
     return jsonify(topology_from_pairs(indexing.topology_pairs(path, int(raw))))
+
+
+@app.get("/api/activity")
+def activity():
+    path = capture_path(request.args.get("file", ""))
+    client_filter = request.args.get("client") or None
+    if indexing.supported(path):
+        state = indexing.request_index(path)
+        if state["state"] != "ready":
+            return jsonify(state), (202 if state["state"] == "indexing" else 422)
+        rows = indexing.activity_rows(path)
+    else:
+        packets = read_capture(path)
+        summaries = summarize(packets)
+        times = {}
+        for p in packets:
+            t = p["ts"]
+            bounds = times.setdefault(p["stream"], [t,t])
+            bounds[0],bounds[1] = min(bounds[0],t),max(bounds[1],t)
+        rows = [{**r,"first_ts":times[r["id"]][0],"last_ts":times[r["id"]][1]} for r in summaries]
+    return jsonify(activity_timeline(rows,client_filter))
+
+
+def _comparison_packets(path, selected):
+    if indexing.supported(path) and indexing.is_ready(path):
+        if indexing.flow_packet_count(path, selected) > MAX_PACKETS:
+            abort(413, "Selected flow exceeds MAX_PACKETS")
+        originals = indexing.original_frames(path, selected)
+        with indexing.extracted_flow(path, selected) as extracted:
+            packets = read_capture(extracted)
+        for p in packets:
+            p["frame"] = originals[p["frame"]-1]
+            p["stream"] = selected
+    else:
+        packets = [p for p in read_capture(path) if p["stream"] == selected]
+    if not packets:
+        abort(404, "Comparison stream not found")
+    first = next((p for p in packets if p["syn"] and not p["ack_flag"]), packets[0])
+    client = (first["src"], first["sport"])
+    for p in packets:
+        p["direction"] = "out" if (p["src"],p["sport"]) == client else "in"
+    return packets
+
+
+@app.get("/api/compare")
+def compare():
+    paths = [capture_path(request.args.get(k,"")) for k in ("file","other")]
+    raw = [request.args.get(k,"") for k in ("stream","other_stream")]
+    if any(not re.fullmatch(r"\d{1,8}", v) for v in raw):
+        abort(400,"Invalid comparison stream")
+    offset = request.args.get("clock_offset_ms")
+    try:
+        offset = float(offset) if offset not in (None,"") else None
+        if offset is not None and not math.isfinite(offset):
+            raise ValueError()
+    except ValueError:
+        abort(400,"Invalid clock offset")
+    try:
+        for path in paths:
+            if indexing.supported(path) and not indexing.is_ready(path):
+                state = indexing.request_index(path)
+                if state["state"] != "ready":
+                    return jsonify(state), (202 if state["state"]=="indexing" else 422)
+        return jsonify(compare_streams(*[_comparison_packets(p,int(s)) for p,s in zip(paths,raw)],offset))
+    except KeyError:
+        abort(404,"Comparison stream not found")
+    except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+        abort(422,"Comparison failed: "+str(exc))
 
 
 @app.get("/api/conversation-payload")

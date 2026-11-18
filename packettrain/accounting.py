@@ -7,6 +7,7 @@ from .decode import slicing_report
 from .behavior import classify_stream
 from .https import analyze_https
 from .transactions import analyze_transactions
+from .diagnostics import diagnose, exchange_fingerprints
 from .position import position_evidence
 from .accounting_tcp import tcp_accounting
 from .fingerprint import fingerprint_endpoint
@@ -186,16 +187,20 @@ def stream_detail(packets, stream):
     symptoms = transport_symptoms(accounting_input)
     fingerprints = fingerprint_endpoint(accounting_input,
                                         (summary["client"], summary["client_port"]))
+    transactions = analyze_transactions(group, https, rtt, side)
+    spread = build_rtt_distribution(group)
     return {"summary": summary, "rtt_ms": round(rtt, 2) if rtt is not None else None,
             "rtt_source": source, "capture_side": side, "position": position,
             "accounting": tcp_detail, "phases": phases, "symptoms": symptoms,
             "fingerprint": fingerprints,
             "handshake_legs_ms": [round(leg1, 3), round(leg2, 3)] if leg1 is not None and leg2 is not None else None,
             "packets": group, "facts": facts, "pattern": pattern,
-            "rtt_distribution": build_rtt_distribution(group),
+            "rtt_distribution": spread,
+            "diagnosis": diagnose(group, transactions, window, rtt, side, spread),
+            "exchange_fingerprints": exchange_fingerprints(transactions),
             "retransmissions": retransmission_analysis(group),
             "receiver_window": window,
-            "https": https, "transactions": analyze_transactions(group, https, rtt, side), "slicing": slicing_report(group),
+            "https": https, "transactions": transactions, "slicing": slicing_report(group),
             "note": "Incoming timestamps are arrival times at the capture point. One-way time is estimated as RTT/2; choose the capture side manually if the handshake is ambiguous."}
 
 

@@ -61,6 +61,20 @@ h2 offered (not proof of negotiation) lowers confidence. Statistics describe
 inferred exchanges, not application SLA measurements. The last response has an
 open end if no next client turn was observed.
 
+## Diagnostic workspace
+
+Evidence-based diagnosis combines observed zero windows, retransmission indicators,
+ACK RTT spread and long encrypted response waits. Suspicions are not probabilities
+or proof of fault location. Exchange fingerprints group approximate request/response
+byte sizes (25% logarithmic buckets), not actual operation names. Capture-wide
+activity uses flow lifetimes on a common capture clock, with a client filter and
+clickable flow bars. Indexed Ethernet PCAPs use the flow manifest without TShark.
+Compare captures accepts two explicitly selected streams, matches unique TCP
+sequence/ACK/length/flags signatures and reports unmatched records and signed
+timestamp deltas. Supply an independently known B-minus-A clock offset optionally.
+It does not prove loss, payload identity, causality or one-way delay. Large
+nonindexed captures remain subject to MAX_PACKETS.
+
 ## Run with Docker
 
 ```bash

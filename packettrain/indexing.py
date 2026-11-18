@@ -273,3 +273,14 @@ def topology_pairs(path, limit=25):
                        "duration_ms": max(0, (int(last) - int(first)) / 1e6),
                        "zero_window_events": int(zeros)})
     return output
+
+
+def activity_rows(path):
+    """Indexed flow lifetimes without invoking TShark or decoding payload."""
+    with _connect(path) as connection:
+        rows = connection.execute(
+            "SELECT id,left_addr,right_addr,first_ts_ns,last_ts_ns,payload_bytes,client_is_left,packets FROM flows"
+        ).fetchall()
+    return [{"id":i,"client":a if left else b,"server":b if left else a,
+             "first_ts":start/1e9,"last_ts":end/1e9,"bytes":size,"packets":count}
+            for i,a,b,start,end,size,left,count in rows]
