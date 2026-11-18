@@ -6,6 +6,7 @@ from flask import abort
 from .decode import slicing_report
 from .behavior import classify_stream
 from .https import analyze_https
+from .transactions import analyze_transactions
 from .position import position_evidence
 from .accounting_tcp import tcp_accounting
 from .fingerprint import fingerprint_endpoint
@@ -194,7 +195,7 @@ def stream_detail(packets, stream):
             "rtt_distribution": build_rtt_distribution(group),
             "retransmissions": retransmission_analysis(group),
             "receiver_window": window,
-            "https": https, "slicing": slicing_report(group),
+            "https": https, "transactions": analyze_transactions(group, https, rtt, side), "slicing": slicing_report(group),
             "note": "Incoming timestamps are arrival times at the capture point. One-way time is estimated as RTT/2; choose the capture side manually if the handshake is ambiguous."}
 
 

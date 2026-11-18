@@ -38,6 +38,29 @@ traffic. SNI can be absent or protected by ECH, and the ClientHello ALPN list
 is an offer, not proof of the protocol selected. Captures that begin after the
 hello show no TLS card.
 
+## Encrypted exchange analysis
+
+The Encrypted exchanges panel uses unique TCP sequence bytes, directional
+payload turns and decoded outer TLS type 23 evidence. It estimates request-like
+and response-like flights, observed wait, response span, bytes and possible
+periodic cadence. First ciphertext flights in each direction are excluded if
+a hello is visible, conservatively discarding potential encrypted handshake
+traffic (and possibly early real application data). Pure ACKs and duplicate
+sequence bytes do not count. Same-direction flights separated by idle time
+are coalesced to avoid treating paced transfers as multiple requests.
+The table includes median/P95/P99, robust slow-outlier candidates (at least five
+samples), and a histogram. Click a row to highlight its time interval across
+the existing graphs and packet/bounce views. Client-side service estimate is
+observed wait minus the selected RTT, floored at zero; near server it is the
+observed wait, and unknown capture side yields no estimate.
+
+These are not decrypted HTTP transactions. HTTP/2 stream multiplexing, TLS 1.3
+encrypted handshakes, tickets and alerts, unobserved retransmissions and capture
+slicing can invalidate inference. Confidence is never higher than moderate;
+h2 offered (not proof of negotiation) lowers confidence. Statistics describe
+inferred exchanges, not application SLA measurements. The last response has an
+open end if no next client turn was observed.
+
 ## Run with Docker
 
 ```bash
