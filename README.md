@@ -74,6 +74,10 @@ TShark starts. PCAPNG and non-Ethernet captures continue to use the existing
 TShark fallback while their indexed support is developed. The named
 `packettrain-cache` volume can be removed to invalidate all indexes.
 
+## Arrange the analysis workspace
+
+Use the **↑** control on any analysis panel or individual graph to move it directly below the capture and TCP stream selector. Use **↶** to restore that panel, or **Reset layout** to restore all panels. Promoted panels remain in place when you change streams and their order is remembered in your browser. The previous/next stream buttons make it easy to compare consecutive conversations; the selector stays visible while scrolling on desktop-sized screens.
+
 ## Reading the visualization
 
 - Local dot launch times use captured timestamps. Incoming dots arrive at the
