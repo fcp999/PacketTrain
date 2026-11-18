@@ -4,13 +4,14 @@ Thin Flask surface. Packet extraction lives in packettrain.decode, TCP summary
 and capture-side inference in packettrain.accounting, traffic-shape rules in
 packettrain.behavior, and TLS handling in packettrain.https.
 """
+import io
 import math
 import re
 import sqlite3
 import subprocess
 from pathlib import Path
 
-from flask import Flask, abort, jsonify, request, send_from_directory
+from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 
 from packettrain.accounting import stream_detail, summarize
 from packettrain.behavior import classify_stream
@@ -18,6 +19,7 @@ from packettrain.config import EXTENSIONS, FIELDS, MAX_BYTES, MAX_PACKETS, captu
 from packettrain.decode import (decimal, flag_bits, flag_set, num, parse_rows,
                                read_capture, read_capture_with_follow, slicing_report)
 from packettrain.https import analyze_https
+from packettrain.http_objects import extract_http_objects, MAX_HTTP_EXPORT_BYTES
 from packettrain.payload import (CONVERSATION_PREVIEW_BYTES, MAX_CONVERSATION_PAGE_BYTES,
                                  conversation_from_follow_output, decode_conversation, decode_segment)
 from packettrain.accounting_tcp import tcp_accounting
@@ -71,7 +73,7 @@ def topology_data():
 
 @app.get("/api/conversation-payload")
 def conversation_payload():
-    """TCP-reassembled payload transcript, previewed at 1,000 bytes by default."""
+    """TCP-reassembled payload transcript, previewed at 5,000 bytes by default."""
     path = capture_path(request.args.get("file", ""))
     raw = request.args.get("stream", "")
     if not re.fullmatch(r"\d{1,8}", raw):
@@ -95,6 +97,48 @@ def conversation_payload():
         except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
             abort(422, "Indexed flow extraction failed: " + str(exc))
     return jsonify(decode_conversation(path, selected, limit, int(offset_raw)))
+
+
+@app.get("/api/http-objects")
+def http_objects():
+    """List or download complete HTTP/1.x GET bodies from the selected stream."""
+    path = capture_path(request.args.get("file", ""))
+    raw = request.args.get("stream", "")
+    if not re.fullmatch(r"\d{1,8}", raw):
+        abort(400, "Invalid stream")
+    selected = int(raw)
+    object_id = request.args.get("object")
+    if object_id is not None and not re.fullmatch(r"\d{1,4}", object_id):
+        abort(400, "Invalid HTTP object id")
+    try:
+        if indexing.supported(path) and indexing.is_ready(path):
+            if indexing.flow_packet_count(path, selected) > MAX_PACKETS:
+                abort(413, "Selected flow exceeds MAX_PACKETS")
+            with indexing.extracted_flow(path, selected) as extracted:
+                objects, warnings = extract_http_objects(extracted, 0)
+        else:
+            objects, warnings = extract_http_objects(path, selected)
+    except KeyError:
+        abort(404, "TCP stream not found")
+    except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+        abort(422, "HTTP object extraction failed: " + str(exc))
+    if object_id is None:
+        return jsonify({"stream": selected, "warnings": warnings,
+                        "max_bytes": MAX_HTTP_EXPORT_BYTES,
+                        "objects": [{k: v for k, v in obj.items() if k != "data"} for obj in objects]})
+    idx = int(object_id)
+    if idx >= len(objects):
+        abort(404, "HTTP object not found")
+    obj = objects[idx]
+    expected = request.args.get("sha256")
+    if expected is not None and expected != obj["sha256"]:
+        abort(422, "HTTP object changed; list the objects again")
+    response = send_file(io.BytesIO(obj["data"]), mimetype="application/octet-stream",
+                         as_attachment=True, download_name=obj["filename"], max_age=0)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Content-Security-Policy"] = "sandbox"
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.get("/api/payload")

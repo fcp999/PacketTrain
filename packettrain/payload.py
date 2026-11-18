@@ -19,7 +19,7 @@ from flask import abort
 from .config import capture_path
 
 MAX_PAYLOAD_BYTES = 1 << 20  # 1 MiB: enough for a body, bounded for the response
-CONVERSATION_PREVIEW_BYTES = 1000
+CONVERSATION_PREVIEW_BYTES = 5000
 MAX_CONVERSATION_PAGE_BYTES = 1 << 20  # Bound each interactive response
 
 

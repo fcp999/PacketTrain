@@ -1314,7 +1314,7 @@ def test_conversation_payload_endpoint_defaults_to_preview(monkeypatch, tmp_path
         stdout = """Follow: tcp,raw
 Node 0: 192.0.2.1:50000
 Node 1: 198.51.100.2:80
-""" + ("41" * 1005) + "\n"
+""" + ("41" * 5005) + "\n"
 
     monkeypatch.setattr(payload_module.subprocess, "run", lambda *a, **k: Result())
     response = packettrain.app.test_client().get(
@@ -1323,10 +1323,10 @@ Node 1: 198.51.100.2:80
     assert response.status_code == 200
     data = response.get_json()
     assert data["scope"] == "conversation"
-    assert data["length"] == 1000
-    assert data["total_length"] == 1005
+    assert data["length"] == 5000
+    assert data["total_length"] == 5005
     assert data["truncated"] is True
-    assert data["chunks"][0]["ascii"] == "A" * 1000
+    assert data["chunks"][0]["ascii"] == "A" * 5000
 
 
 def test_follow_raw_offset_pages_continue_in_conversation_order():

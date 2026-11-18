@@ -74,6 +74,25 @@ TShark starts. PCAPNG and non-Ethernet captures continue to use the existing
 TShark fallback while their indexed support is developed. The named
 `packettrain-cache` volume can be removed to invalidate all indexes.
 
+## HTTP file recovery
+
+The initial conversation payload preview is 5,000 **bytes** (one display
+character per byte in ASCII mode). Choose **Extract HTTP files** in the Payload
+panel to recover complete successful GET response bodies from the selected
+plaintext HTTP/1.0 or HTTP/1.1 stream. The result lists a suggested filename
+(from Content-Disposition or the request URL), size, media type, and SHA-256.
+Click a filename to save the binary attachment. No request is made to the
+original server. TCP retransmissions are deduplicated, chunked transfer framing
+is removed, and gzip/deflate content encoding is decoded when possible.
+Unsupported content encodings are offered as clearly marked encoded bodies,
+not original files. HTTPS, HTTP/2, HTTP/3, multipart range reconstruction and
+206 Partial Content are not supported. Missing TCP bytes, incomplete HTTP
+framing, or a missing FIN on close-delimited responses prevent recovery of the
+affected object; earlier complete objects may still be returned.
+The default total reassembled stream / export limit is 64 MiB, configurable
+through MAX_HTTP_EXPORT_BYTES (bytes) in the container environment. Downloads
+are untrusted, served as attachments, and never executed by PacketTrain.
+
 ## Arrange the analysis workspace
 
 Use the **↑** control on any analysis panel or individual graph to move it directly below the capture and TCP stream selector. Use **↶** to restore that panel, or **Reset layout** to restore all panels. Promoted panels remain in place when you change streams and their order is remembered in your browser. The previous/next stream buttons make it easy to compare consecutive conversations; the selector stays visible while scrolling on desktop-sized screens.
