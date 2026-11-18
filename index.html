@@ -209,9 +209,10 @@ function showDiagnostics(d, groups){
   tr.onclick=choose;tr.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();choose()}};$('exchangeFingerprintRows').append(tr)
  }
 }
-let workspaceRequest=0;
+let workspaceRequest=0,comparisonRequest=0;
+function resetComparison(){comparisonRequest++;$('compareOutput').replaceChildren();$('runCompare').disabled=false;}
 function resetWorkspaceExtras(){
- workspaceRequest++;$('activityNote').textContent='';$('compareOutput').replaceChildren();
+ workspaceRequest++;comparisonRequest++;$('activityNote').textContent='';$('compareOutput').replaceChildren();
  if(window.Plotly&&$('activityPlot').data)Plotly.purge($('activityPlot'));
  $('loadActivity').disabled=false;$('runCompare').disabled=false;
 }
@@ -228,7 +229,6 @@ async function workspaceApi(path,valid){
 $('loadActivity').onclick=async()=>{
  const file=$('file').value;if(!file)return;
  const token=++workspaceRequest,valid=()=>token===workspaceRequest&&file===$('file').value;
- $('runCompare').disabled=false;
  const client=$('activityClient').checked?flow?.summary.client:null;
  $('loadActivity').disabled=true;$('activityNote').textContent='Reading flow lifetimes…';
  try{
@@ -249,8 +249,8 @@ new MutationObserver(syncCompareOptions).observe($('file'),{childList:true});
 $('runCompare').onclick=async()=>{
  const file=$('file').value,stream=$('stream').value,other=$('compareFile').value,other_stream=$('compareStream').value;
  if(!file||stream===''||!other||other_stream==='')return;
- const token=++workspaceRequest,valid=()=>token===workspaceRequest&&file===$('file').value&&stream===$('stream').value;
- $('loadActivity').disabled=false;const box=$('compareOutput');box.textContent='Comparing packet signatures…';$('runCompare').disabled=true;
+ const token=++comparisonRequest,valid=()=>token===comparisonRequest&&file===$('file').value&&stream===$('stream').value;
+ const box=$('compareOutput');box.textContent='Comparing packet signatures…';$('runCompare').disabled=true;
  try{
   const d=await workspaceApi(BASE+'/api/compare?'+new URLSearchParams({file,stream,other,other_stream,clock_offset_ms:$('compareOffset').value}),valid);if(!d||!valid())return;
   box.replaceChildren();const line=t=>{const el=document.createElement('p');el.textContent=t;box.append(el)};
@@ -599,6 +599,6 @@ $('play').onclick=()=>{if(timer){stop();return}if(clock>=duration)setTime(timeSt
  if(!skipping){const gap=nextCompressedAfter(clock);if(gap&&!expandedGaps[gap.start_ms]&&next>=gap.start_ms){setTime(gap.start_ms);skipping=true;showSkipLabel(gap);setTimeout(()=>{if(!timer)return;skipping=false;setTime(gap.end_ms);hideSkipLabel()},800);return}}
  setTime(next);const limit=(selection.to!=null&&selection.from!=null)?selection.to:duration;if(clock>=limit)stop()},30)};
 $('step').onclick=()=>{stop();let next=events.filter(e=>e.start>clock+0.0001).sort((a,b)=>a.start-b.start)[0];setTime(next?next.start:duration);if(next)detail(next.p)};
-$('scrub').oninput=e=>{stop();setTime(e.target.value)};$('pmode').onchange=loadPlayback;$('speed').oninput=()=>{userSetSpeed=true;updateSpeedLabel()};$('speed').onchange=loadPlayback;$('speedReset').onclick=()=>{userSetSpeed=false;$('speed').value=0;updateSpeedLabel();if(flow&&flow.rtt_ms)applyAutoSpeed(flow.rtt_ms);loadPlayback()};updateSpeedLabel();async function loadSelectedFlow(){resetWorkspaceExtras();resetHttpObjects();updateStreamNav();const request=++streamRequest;let file=$('file').value,stream=$('stream').value;if(!file||stream==='')return;stop();try{status('Analyzing flow and payload in one TShark pass…');const d=await api(BASE+`/api/bootstrap?file=${encodeURIComponent(file)}&stream=${encodeURIComponent(stream)}${indexedFile===file?'&include_streams=0':''}`);if(request!==streamRequest)return;installCombined(d);if(captureSide!=='unknown'&&(Number($('rttOverride').value)>0||flow.rtt_ms))status(`Loaded stream ${stream}: ${flow.packets.length} packets · ${d.indexed?'indexed extraction':'one TShark pass'}`)}catch(e){status(e.message,true)}}
+$('scrub').oninput=e=>{stop();setTime(e.target.value)};$('pmode').onchange=loadPlayback;$('speed').oninput=()=>{userSetSpeed=true;updateSpeedLabel()};$('speed').onchange=loadPlayback;$('speedReset').onclick=()=>{userSetSpeed=false;$('speed').value=0;updateSpeedLabel();if(flow&&flow.rtt_ms)applyAutoSpeed(flow.rtt_ms);loadPlayback()};updateSpeedLabel();async function loadSelectedFlow(){resetComparison();resetHttpObjects();updateStreamNav();const request=++streamRequest;let file=$('file').value,stream=$('stream').value;if(!file||stream==='')return;stop();try{status('Analyzing flow and payload in one TShark pass…');const d=await api(BASE+`/api/bootstrap?file=${encodeURIComponent(file)}&stream=${encodeURIComponent(stream)}${indexedFile===file?'&include_streams=0':''}`);if(request!==streamRequest)return;installCombined(d);if(captureSide!=='unknown'&&(Number($('rttOverride').value)>0||flow.rtt_ms))status(`Loaded stream ${stream}: ${flow.packets.length} packets · ${d.indexed?'indexed extraction':'one TShark pass'}`)}catch(e){status(e.message,true)}}
 $('fullConversation').onclick=()=>{clearSelection();$('rangeNote').textContent='Full conversation';};$('refresh').onclick=()=>refresh(true);$('file').onchange=()=>streams(true);$('stream').onchange=()=>{updateStreamNav();loadSelectedFlow()};$('load').onclick=loadSelectedFlow;for(const id of ['rate','pshToggle','eventsToggle','side','rttOverride'])$(id).onchange=()=>{if(flow)build()};refresh(true);
 </script></body></html>
