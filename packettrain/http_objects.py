@@ -19,7 +19,7 @@ from flask import abort
 
 from .config import MAX_PACKETS
 
-MAX_HTTP_EXPORT_BYTES = int(os.environ.get("MAX_HTTP_EXPORT_BYTES", str(64 * 1024**2)))
+MAX_HTTP_EXPORT_BYTES = int(os.environ.get("MAX_HTTP_EXPORT_BYTES", str(512 * 1024**2)))
 MAX_HEADER = 64 * 1024
 MAX_OBJECTS = 256
 

@@ -7,8 +7,9 @@ services:
       - "8088:8080"
     environment:
       PCAP_DIR: /pcaps
-      MAX_PCAP_BYTES: 268435456
-      MAX_PACKETS: 100000
+      MAX_PCAP_BYTES: ${MAX_PCAP_BYTES:-1073741824}
+      MAX_PACKETS: ${MAX_PACKETS:-100000}
+      MAX_HTTP_EXPORT_BYTES: ${MAX_HTTP_EXPORT_BYTES:-536870912}
       PACKETTRAIN_INDEX_DIR: /cache
     volumes:
       - ${PCAP_PATH:-./pcaps}:/pcaps:ro

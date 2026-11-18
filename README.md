@@ -89,8 +89,8 @@ not original files. HTTPS, HTTP/2, HTTP/3, multipart range reconstruction and
 206 Partial Content are not supported. Missing TCP bytes, incomplete HTTP
 framing, or a missing FIN on close-delimited responses prevent recovery of the
 affected object; earlier complete objects may still be returned.
-The default total reassembled stream / export limit is 64 MiB, configurable
-through MAX_HTTP_EXPORT_BYTES (bytes) in the container environment. Downloads
+The default total reassembled stream / export limit is 512 MiB, configurable
+through MAX_HTTP_EXPORT_BYTES (bytes) in the container environment. Docker Compose also exposes MAX_PCAP_BYTES (default 1 GiB) and MAX_PACKETS as environment overrides. Export memory can exceed the recovered file size because reassembly and decoding keep intermediate buffers; concurrent large requests multiply that cost. Downloads
 are untrusted, served as attachments, and never executed by PacketTrain.
 
 ## Arrange the analysis workspace
